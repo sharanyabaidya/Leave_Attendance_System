@@ -2139,8 +2139,8 @@ function setupDummyData() {
       headers: ['EmployeeID', 'EmployeeName', 'Email', 'Department', 'Role', 'Salary', 'PasswordHash', 'JoiningDate', 'IsActive', 'Phone'],
       rows: [
         ['EMP001', 'Alice Smith', 'alice@example.com', 'Engineering', 'employee', 60000, hashPassword('pass123'), '2026-01-01', true, '1234567890'],
-        ['EMP002', 'Bob Jones', 'bob@example.com', 'Human Resources', 'hr', 70000, hashPassword('hr123'), '2026-01-01', true, '0987654321'],
-        ['EMP003', 'Charlie Brown', 'charlie@example.com', 'Operations', 'office_staff', 50000, hashPassword('pass123'), '2026-01-01', true, '1122334455'],
+        ['EMP002', 'Bob Jones', 'bob@example.com', 'Human Resources', 'employee', 70000, hashPassword('pass123'), '2026-01-01', true, '0987654321'],
+        ['EMP003', 'Charlie Brown', 'charlie@example.com', 'Operations', 'office_staff', 50000, hashPassword('hr123'), '2026-01-01', true, '1122334455'],
         ['EMP004', 'Dave Admin', 'dave@example.com', 'Management', 'super_admin', 90000, hashPassword('admin123'), '2026-01-01', true, '5566778899']
       ]
     },
