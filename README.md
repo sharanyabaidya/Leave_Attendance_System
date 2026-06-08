@@ -54,6 +54,5 @@ To host the user interface live:
 ## 🔑 Default Credentials (from Dummy Data)
 Use these logins to test the interface after deployment:
 * **Employee**: ID: `EMP001` | Password: `pass123`
-* **HR Manager**: ID: `EMP002` | Password: `hr123`
-* **Office Staff**: ID: `EMP003` | Password: `pass123`
+* **Office Staff**: ID: `EMP003` | Password: `hr123`
 * **Super Admin**: ID: `EMP004` | Password: `admin123`
