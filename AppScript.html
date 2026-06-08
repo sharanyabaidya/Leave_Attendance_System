@@ -1,0 +1,2521 @@
+<script>
+  // ============================================================
+  // LEAVE & ATTENDANCE MANAGEMENT SYSTEM — Frontend JS
+  // ============================================================
+
+  let currentUser = null;
+  let currentPage = 'dashboard';
+  let dashData = null;
+  let isDark = false;
+  let allEmployees = [];
+
+  const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
+  // ============================================================
+  // INIT
+  // ============================================================
+  window.onload = () => {
+    const saved = localStorage.getItem('las_theme');
+    if (saved === 'dark') setTheme(true);
+    updateDate();
+    setInterval(updateDate, 60000);
+
+    // Check saved session
+    const savedUser = sessionStorage.getItem('las_user');
+    if (savedUser) {
+      try {
+        currentUser = JSON.parse(savedUser);
+        initApp();
+      } catch (e) { /* fresh login */ }
+    }
+  };
+
+  function updateDate() {
+    const el = document.getElementById('topbarDate');
+    if (!el) return;
+    const d = new Date();
+    el.textContent = d.toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
+  }
+
+  // ============================================================
+  // THEME
+  // ============================================================
+  function setTheme(dark) {
+    isDark = dark;
+    const body = document.getElementById('appBody');
+    body.classList.toggle('dark-theme', dark);
+    body.classList.toggle('light-theme', !dark);
+    const icon = document.getElementById('themeIcon');
+    const label = document.getElementById('themeLabel');
+    if (icon) icon.textContent = dark ? '☀️' : '🌙';
+    if (label) label.textContent = dark ? 'Light Mode' : 'Dark Mode';
+    localStorage.setItem('las_theme', dark ? 'dark' : 'light');
+  }
+
+  function toggleTheme() { setTheme(!isDark); }
+
+  // ============================================================
+  // AUTH
+  // ============================================================
+  function togglePw() {
+    const inp = document.getElementById('loginPassword');
+    inp.type = inp.type === 'password' ? 'text' : 'password';
+  }
+
+  function doLogin() {
+    const empId = document.getElementById('loginEmpId').value.trim().toUpperCase();
+    const pass = document.getElementById('loginPassword').value;
+    const btn = document.getElementById('loginBtnText');
+    const spin = document.getElementById('loginSpinner');
+    const err = document.getElementById('loginError');
+    err.classList.add('hidden');
+    if (!empId || !pass) { showError(err, 'Please enter Employee ID and password.'); return; }
+    btn.classList.add('hidden'); spin.classList.remove('hidden');
+    google.script.run
+      .withSuccessHandler(r => {
+        btn.classList.remove('hidden'); spin.classList.add('hidden');
+        if (r.success) {
+          currentUser = r.user;
+          sessionStorage.setItem('las_user', JSON.stringify(currentUser));
+          initApp();
+        } else { showError(err, r.message); }
+      })
+      .withFailureHandler(e => {
+        btn.classList.remove('hidden'); spin.classList.add('hidden');
+        showError(err, 'Connection error. Please try again.');
+      })
+      .login(empId, pass);
+  }
+
+  function showError(el, msg) { el.textContent = msg; el.classList.remove('hidden'); }
+
+  function logout() {
+    sessionStorage.removeItem('las_user');
+    currentUser = null; dashData = null;
+    document.getElementById('loginScreen').classList.add('active');
+    document.getElementById('loginScreen').classList.remove('hidden');
+    document.getElementById('mainApp').classList.add('hidden');
+    document.getElementById('loginEmpId').value = '';
+    document.getElementById('loginPassword').value = '';
+  }
+
+  // ============================================================
+  // APP INIT
+  // ============================================================
+  function initApp() {
+    document.getElementById('loginScreen').classList.remove('active');
+    document.getElementById('loginScreen').classList.add('hidden');
+    document.getElementById('mainApp').classList.remove('hidden');
+
+    const isAdmin = isAdminUser();
+    const initials = currentUser.name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2);
+    document.getElementById('sidebarAvatar').textContent = initials;
+    document.getElementById('topbarAvatar').textContent = initials;
+    document.getElementById('sidebarName').textContent = currentUser.name;
+    document.getElementById('sidebarRole').textContent = roleLabel(currentUser.role);
+
+    // Show admin nav for anyone who is not a plain employee
+    const showAdminNav = currentUser.role !== 'employee';
+    if (showAdminNav) {
+      document.getElementById('adminNav').classList.remove('hidden');
+    }
+    setupNavVisibility();
+    loadEmployeeList();
+    navigate('dashboard');
+  }
+  function setupNavVisibility() {
+    const role = currentUser.role;
+
+    document.querySelectorAll('.nav-item[data-page]').forEach(el => {
+      const page = el.dataset.page;
+
+      if (role === 'super_admin') {
+        // Super admin is NOT a personal employee — hide personal tabs
+        if (page === 'myLeaves' || page === 'myAttendance') {
+          el.style.display = 'none';
+        }
+        // applyLeave  → KEEP (they apply for others)
+        // attendance  → KEEP (they enter/view attendance)
+        // allLeaves, salaryCalc, employees → KEEP
+      }
+
+      if (role === 'office_staff') {
+        // Office staff cannot see salary calculator or employee analysis
+        if (page === 'salaryCalc' || page === 'empAnalysis') {
+          el.style.display = 'none';
+        }
+      }
+
+      if (role === 'hr') {
+        // HR cannot see salary calculator or employee analysis unless they have access
+        if (page === 'salaryCalc' && !canAccessSalary()) {
+          el.style.display = 'none';
+        }
+        if (page === 'empAnalysis' && !canAccessSalary()) {
+          el.style.display = 'none';
+        }
+        if (page === 'employees' && !canViewEmployees()) {
+          el.style.display = 'none';
+        }
+      }
+      // 'hr' and 'employee': no nav changes needed here
+    });
+  }
+  function isAdminUser() {
+    return currentUser && (currentUser.role === 'super_admin' || currentUser.role === 'hr')//|| currentUser.role === 'office_staff');
+  }
+  function canApplyForOthers() {
+    return currentUser && (currentUser.role === 'super_admin' || currentUser.role === 'hr' || currentUser.role === 'office_staff');
+  }
+  function canApproveLeave() {
+    return currentUser && (currentUser.role === 'super_admin' || currentUser.role === 'hr');
+  }
+  function canAccessSalary() {
+    return currentUser && (currentUser.role === 'super_admin' || currentUser.role === 'hr');
+  }
+  // Only office_staff and super_admin can view all attendance
+  function canViewAllAttendance() {
+    return currentUser && (currentUser.role === 'super_admin' || currentUser.role === 'hr' || currentUser.role === 'office_staff');
+  }
+  // Only super_admin and office staff can view leaves in employee list
+  function canViewEmployees() {
+    return currentUser && (currentUser.role === 'super_admin' || currentUser.role === 'office_staff');
+  }
+
+  function roleLabel(r) {
+    const map = { super_admin: 'Super Admin', hr: 'HR Manager', employee: 'Employee', office_staff: 'Office Staff' };
+    return map[r] || r;
+  }
+
+  function loadEmployeeList() {
+    google.script.run
+      .withSuccessHandler(list => { allEmployees = list || []; })
+      .getEmployeeList();
+  }
+
+  function navigate(page) {
+    currentPage = page;
+
+    if (page === 'allLeaves' && !canApproveLeave() && !canViewAllAttendance()) {
+      showToast('Access denied.', 'error'); return;
+    }
+    if ((page === 'salaryCalc' || page === 'empAnalysis') && !canAccessSalary()) {
+      showToast('Access denied.', 'error'); return;
+    }
+    if (page === 'attendance' && !canViewAllAttendance()) {
+      showToast('Access denied.', 'error'); return;
+    }
+    if (page === 'employees' && !canViewEmployees()) {
+      showToast('Access denied.', 'error'); return;
+    }
+
+    if (page !== 'allLeaves') window._allLeavesData = null;
+    if (page !== 'myLeaves') window._myLeavesData = null;
+
+    document.querySelectorAll('.nav-item').forEach(el => {
+      el.classList.toggle('active', el.dataset.page === page);
+    });
+    closeSidebar();
+
+    const titles = {
+      dashboard: ['Dashboard', 'Overview of attendance & leaves'],
+      myLeaves: ['My Leaves', 'History of your leave applications'],
+      myAttendance: ['Attendance', 'Monthly attendance breakdown'],
+      applyLeave: ['Apply Leave', 'Submit a new leave application'],
+      allLeaves: ['All Applications', 'Review leave requests'],
+      attendance: ['Enter Attendance', 'Record monthly attendance data'],
+      salaryCalc: ['Salary Calculator', 'Compute salary deductions — Admin only'],
+      empAnalysis: ['Employee Analysis', 'AI-powered YTD visual insights & executive reports'],
+      employees: ['Employees', 'All employee records'],
+    };
+    const [title, sub] = titles[page] || ['Page', ''];
+    document.getElementById('pageTitle').textContent = title;
+    document.getElementById('pageSubtitle').textContent = sub;
+    showLoader();
+
+    const renderers = {
+      dashboard: renderDashboard,
+      myLeaves: renderMyLeaves,
+      myAttendance: renderMyAttendance,
+      applyLeave: renderApplyLeave,
+      allLeaves: renderAllLeaves,
+      attendance: renderAttendanceEntry,
+      salaryCalc: renderSalaryCalc,
+      empAnalysis: renderEmpAnalysis,
+      employees: renderEmployees,
+    };
+    (renderers[page] || (() => hideLoader()))();
+  }
+
+  function showLoader() {
+    document.getElementById('pageContent').innerHTML = `
+    <div class="loading-screen fade-in">
+      <div class="loader-ring"></div><p>Loading...</p>
+    </div>`;
+  }
+  function hideLoader() { }
+  function setContent(html) {
+    document.getElementById('pageContent').innerHTML = `<div class="fade-in">${html}</div>`;
+  }
+
+  // ============================================================
+  // DASHBOARD
+  // ============================================================
+  function renderDashboard() {
+    google.script.run
+      .withSuccessHandler(data => {
+        dashData = data;
+        if (isAdminUser()) renderAdminDashboard(data);
+        else renderEmployeeDashboard(data);
+      })
+      .getDashboardData(currentUser.id, currentUser.role);
+  }
+
+  function renderEmployeeDashboard(data) {
+    const bal = data.balance || {};
+    const att = data.attendance || [];
+    const leaves = data.myLeaves || [];
+    const pending = leaves.filter(l => l.status === 'Pending').length;
+
+    const approvedCL = bal.approvedLeaveUsed || 0;
+    const unapprovedAbs = (bal.unapprovedAbsentUsed || 0) + (bal.rejectedCasualUsed || 0);
+    const rejectedME = bal.rejectedMedOrEmgUsed || 0;
+
+    // Total Used YTD counted under paid limit: Approved Casual + Absents (including marked rejected casuals) + Rejected Med/Emg
+    const used = approvedCL + unapprovedAbs + rejectedME;
+    const limit = bal.totalEntitled || 14;
+    const remaining = Math.max(0, limit - used);
+    const pct = Math.round((used / limit) * 100);
+    const barColor = pct > 85 ? 'red' : pct > 60 ? 'amber' : 'green';
+    const recentLeaves = leaves.slice(0, 5);
+    const monthlyAtt = att.slice(-3).reverse();
+
+    setContent(`
+    <div class="page-header">
+      <h2>Good ${getGreeting()}, ${currentUser.name.split(' ')[0]} 👋</h2>
+      <p>Here's your attendance & leave summary for ${new Date().getFullYear()}</p>
+    </div>
+ 
+    <!-- STATS -->
+    <div class="stats-grid section-gap">
+      <div class="stat-card">
+        <div class="stat-icon blue">📋</div>
+        <div class="stat-info">
+          <div class="stat-value">${used}</div>
+          <div class="stat-label">Leaves Used</div>
+          <div class="stat-sub">of ${limit} this year</div>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon green">✅</div>
+        <div class="stat-info">
+          <div class="stat-value">${remaining}</div>
+          <div class="stat-label">Leaves Remaining</div>
+          <div class="stat-sub">paid leaves left</div>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon amber">⏳</div>
+        <div class="stat-info">
+          <div class="stat-value">${pending}</div>
+          <div class="stat-label">Pending Requests</div>
+          <div class="stat-sub">awaiting approval</div>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon purple">🏥</div>
+        <div class="stat-info">
+          <div class="stat-value">${bal.medicalLeaveUsed || 0}</div>
+          <div class="stat-label">Medical Leaves</div>
+          <div class="stat-sub">not counted in ${limit}</div>
+        </div>
+      </div>
+    </div>
+ 
+    <div class="grid-2 section-gap">
+      <!-- Leave Balance -->
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Leave Balance — ${new Date().getFullYear()}</span>
+          <button class="btn-secondary btn-sm" onclick="navigate('applyLeave')">+ Apply</button>
+        </div>
+        <div class="card-body">
+          <div class="leave-balance-grid" style="grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));">
+            <div class="lb-card"><div class="lb-number lb-accent">${bal.approvedLeaveUsed || 0}</div><div class="lb-label">Casual</div></div>
+            <div class="lb-card"><div class="lb-number lb-info">${bal.medicalLeaveUsed || 0}</div><div class="lb-label">Medical</div></div>
+            <div class="lb-card"><div class="lb-number lb-warning">${bal.emergencyLeaveUsed || 0}</div><div class="lb-label">Emergency</div></div>
+            <div class="lb-card"><div class="lb-number lb-danger">${(bal.unapprovedAbsentUsed || 0) + (bal.rejectedCasualUsed || 0)}</div><div class="lb-label">Absent</div></div>
+            <div class="lb-card"><div class="lb-number lb-info" style="color:var(--text-3);">${bal.rejectedMedOrEmgUsed || 0}</div><div class="lb-label">Rejected Med/Emg</div></div>
+          </div>
+          <div class="progress-wrap">
+            <div class="progress-label"><span>Leave Usage</span><span>${used}/${limit} days</span></div>
+            <div class="progress-bar"><div class="progress-fill ${barColor}" style="width:${pct}%"></div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Recent Activity -->
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Recent Applications</span>
+          <button class="btn-secondary btn-sm" onclick="navigate('myLeaves')">View All</button>
+        </div>
+        <div class="card-body">
+          ${recentLeaves.length ? `<div class="timeline">
+            ${recentLeaves.map(l => `
+              <div class="tl-item">
+                <div class="tl-dot ${l.status.toLowerCase()}">${l.status[0]}</div>
+                <div class="tl-content">
+                  <div class="tl-title">${l.leaveType}</div>
+                  <div class="tl-sub">${l.fromDate} → ${l.toDate} · ${l.totalDays}d · <span class="badge badge-${l.status.toLowerCase()}">${l.status}</span></div>
+                </div>
+              </div>`).join('')}
+          </div>` : `<div class="empty-state"><div class="empty-icon">📭</div><h3>No applications yet</h3><p>Apply for leave when needed</p></div>`}
+        </div>
+      </div>
+    </div>
+
+    <!-- Monthly Attendance -->
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Monthly Attendance — Last 3 Months</span>
+        <button class="btn-secondary btn-sm" onclick="navigate('myAttendance')">Full View</button>
+      </div>
+      <div class="card-body">
+        ${monthlyAtt.length ? `
+        <div class="grid-3">
+          ${monthlyAtt.map(m => renderAttCard(m)).join('')}
+        </div>
+        <div class="att-legends" style="margin-top:16px">
+          <div class="att-legend"><div class="att-legend-dot" style="background:var(--success)"></div>Present</div>
+          <div class="att-legend"><div class="att-legend-dot" style="background:var(--accent)"></div>Approved Leave</div>
+          <div class="att-legend"><div class="att-legend-dot" style="background:var(--info)"></div>Medical</div>
+          <div class="att-legend"><div class="att-legend-dot" style="background:var(--danger)"></div>Absent</div>
+        </div>` : `<div class="empty-state"><div class="empty-icon">📅</div><h3>No attendance data yet</h3><p>Contact HR for attendance records</p></div>`}
+      </div>
+    </div>
+  `);
+  }
+
+  function renderAdminDashboard(data) {
+    const allLeaves = data.allLeaves || [];
+    const pending = data.pendingLeaves || [];
+    const employees = data.allEmployees || [];
+    const attAll = data.currentMonthAttendance || [];
+    const totalAbs = attAll.reduce((s, a) => s + (parseInt(a.daysAbsent) || 0), 0);
+    const totalPres = attAll.reduce((s, a) => s + (parseInt(a.daysPresent) || 0), 0);
+
+    document.getElementById('pendingBadge').textContent = pending.length || '';
+
+    setContent(`
+    <div class="page-header">
+      <h2>Admin Dashboard 🛡️</h2>
+      <p>Manage leaves, attendance, and employee records</p>
+    </div>
+
+    <div class="stats-grid section-gap">
+      <div class="stat-card">
+        <div class="stat-icon blue">👥</div>
+        <div class="stat-info"><div class="stat-value">${employees.length}</div><div class="stat-label">Total Employees</div></div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon amber">⏳</div>
+        <div class="stat-info"><div class="stat-value">${pending.length}</div><div class="stat-label">Pending Leaves</div><div class="stat-sub">needs your action</div></div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon red">❌</div>
+        <div class="stat-info"><div class="stat-value">${totalAbs}</div><div class="stat-label">Absents This Month</div><div class="stat-sub">across all employees</div></div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon green">✅</div>
+        <div class="stat-info"><div class="stat-value">${allLeaves.filter(l => l.status === 'Approved').length}</div><div class="stat-label">Leaves Approved</div><div class="stat-sub">this year</div></div>
+      </div>
+    </div>
+
+    <div class="grid-2 section-gap">
+      <!-- Pending Approvals -->
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Pending Approvals</span>
+          <button class="btn-secondary btn-sm" onclick="navigate('allLeaves')">View All</button>
+        </div>
+        <div class="card-body">
+          ${pending.length ? `<div class="timeline">
+            ${pending.slice(0, 5).map(l => `
+              <div class="tl-item">
+                <div class="tl-dot pending">!</div>
+                <div class="tl-content">
+                  <div class="tl-title">${l.employeeName}</div>
+                  <div class="tl-sub">${l.leaveType} · ${l.fromDate} → ${l.toDate} · ${l.totalDays}d</div>
+                  ${canApproveLeave() ? `<div style="margin-top:6px;display:flex;gap:8px">
+                    <button class="btn-success btn-sm" onclick="quickApprove('${l.appId}')">✓ Approve</button>
+                    <button class="btn-danger btn-sm" onclick="quickReject('${l.appId}')">✕ Reject</button>
+                  </div>` : ''}
+                </div>
+              </div>`).join('')}
+          </div>` : `<div class="empty-state"><div class="empty-icon">🎉</div><h3>All clear!</h3><p>No pending applications</p></div>`}
+        </div>
+      </div>
+
+      <!-- Recent All -->
+      <div class="card">
+        <div class="card-header"><span class="card-title">Recent Applications</span></div>
+        <div class="card-body">
+          ${allLeaves.length ? `<div class="timeline">
+            ${allLeaves.slice(0, 6).map(l => `
+              <div class="tl-item">
+                <div class="tl-dot ${l.status.toLowerCase()}">${l.status[0]}</div>
+                <div class="tl-content">
+                  <div class="tl-title">${l.employeeName} <span class="badge badge-${l.status.toLowerCase()}" style="margin-left:6px">${l.status}</span></div>
+                  <div class="tl-sub">${l.leaveType} · ${l.fromDate} to ${l.toDate}</div>
+                </div>
+              </div>`).join('')}
+          </div>` : `<div class="empty-state"><div class="empty-icon">📭</div><h3>No applications yet</h3></div>`}
+        </div>
+      </div>
+    </div>
+
+    <!-- Extract Attendance Section (Super Admin only) -->
+    ${currentUser.role === 'super_admin' ? `
+    <div class="card section-gap" style="border-left: 4px solid var(--accent);box-shadow:var(--shadow-md);">
+      <div class="card-header">
+        <span class="card-title" style="display:flex;align-items:center;gap:8px">
+          🔌 Extract Monthly Attendance
+        </span>
+        <span class="badge badge-neutral" style="font-size:0.72rem">External Tracker Integration</span>
+      </div>
+      <div class="card-body">
+        <p style="font-size:0.84rem;color:var(--text-2);margin-bottom:16px">
+          Sync employee attendance data directly from the external Google Sheet tracker. This fetches working days and present days, and automatically populates leave buckets and absent days using organization leave applications.
+        </p>
+        <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end">
+          <div class="form-group" style="margin:0;flex:1;min-width:140px">
+            <label style="font-size:0.75rem;margin-bottom:6px">Target Month</label>
+            <select id="extractMonthDash">${MONTHS.map((m, i) => `<option value="${m}" ${i === new Date().getMonth() ? 'selected' : ''}>${m}</option>`).join('')}</select>
+          </div>
+          <div class="form-group" style="margin:0;width:100px">
+            <label style="font-size:0.75rem;margin-bottom:6px">Target Year</label>
+            <input type="number" id="extractYearDash" value="${new Date().getFullYear()}">
+          </div>
+          <button class="btn-primary" onclick="triggerExtraction('Dash')" style="height:42px;display:flex;align-items:center;gap:8px">
+            ⚡ Sync & Extract Attendance
+          </button>
+        </div>
+        <div id="extractStatusDash" style="margin-top:12px;font-size:0.85rem;font-weight:600;display:none"></div>
+      </div>
+    </div>` : ''}
+
+    <!-- Email Thread Setup Section (Super Admin only) -->
+    ${currentUser.role === 'super_admin' ? `
+    <div class="card section-gap" style="border-left: 4px solid var(--accent);box-shadow:var(--shadow-md);">
+      <div class="card-header">
+        <span class="card-title" style="display:flex;align-items:center;gap:8px">
+          ✉️ Launch Official Email Thread
+        </span>
+        <span class="badge badge-neutral" style="font-size:0.72rem">Setup</span>
+      </div>
+      <div class="card-body">
+        <p style="font-size:0.84rem;color:var(--text-2);margin-bottom:16px">
+          Send the launch setup email to the administrative group to initialize the official thread for leave applications and approvals.
+        </p>
+        <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+          <button id="btnSendTestMail" class="btn-primary" onclick="triggerTestMail()" style="height:42px;display:flex;align-items:center;gap:8px">
+            🚀 Send Launch Email
+          </button>
+          <div id="testMailSpinner" class="btn-spinner hidden" style="border:2px solid rgba(0,0,0,0.1);border-top-color:var(--accent);"></div>
+        </div>
+        <div id="testMailStatus" style="margin-top:12px;font-size:0.85rem;font-weight:600;padding:10px 14px;border-radius:var(--r-sm);border:1.5px solid transparent;display:none"></div>
+      </div>
+    </div>` : ''}
+ 
+    <!-- Admin Quick Links -->
+    <div class="card section-gap">
+      <div class="card-header"><span class="card-title">Quick Actions</span></div>
+      <div class="card-body" style="display:flex;flex-wrap:wrap;gap:12px">
+        <button class="btn-primary" onclick="navigate('allLeaves')">📬 View Applications</button>
+        <button class="btn-secondary" onclick="navigate('attendance')">✏️ Enter Attendance</button>
+        ${canAccessSalary() ? `<button class="btn-secondary" onclick="navigate('salaryCalc')">💰 Calculate Salary</button>` : ''}
+        <button class="btn-secondary" onclick="navigate('employees')">👥 Manage Employees</button>
+      </div>
+    </div>
+  `);
+  }
+
+  // ============================================================
+  // MY LEAVES
+  // ============================================================
+  function renderMyLeaves() {
+    google.script.run
+      .withSuccessHandler(rawLeaves => {
+        const leaves = sanitizeLeaves(rawLeaves);
+        window._myLeavesData = leaves;
+        const rows = leaves.map(l => `
+        <tr>
+          <td><span class="mono">${l.appId}</span></td>
+          <td>${l.leaveType}</td>
+          <td>${l.fromDate}</td>
+          <td>${l.toDate}</td>
+          <td><span class="badge badge-neutral">${l.totalDays}d</span></td>
+          <td><span class="badge badge-${l.status.toLowerCase()}">${l.status}</span></td>
+          <td>${l.appliedOn}</td>
+          <td><button class="btn-secondary btn-sm" onclick="viewLeaveDetail('${l.appId}')">View</button></td>
+        </tr>`).join('');
+        setContent(`
+        <div class="page-header">
+          <h2>My Leave Applications</h2>
+          <p>All your submitted leave requests</p>
+        </div>
+        <div style="text-align:right;margin-bottom:16px">
+          <button class="btn-primary" onclick="navigate('applyLeave')">+ Apply New Leave</button>
+        </div>
+        <div class="card">
+          <div class="card-body">
+            ${leaves.length ? `<div class="table-wrap"><table>
+              <thead><tr>
+                <th>App ID</th><th>Type</th><th>From</th><th>To</th>
+                <th>Days</th><th>Status</th><th>Applied On</th><th></th>
+              </tr></thead>
+              <tbody>${rows}</tbody>
+            </table></div>` : `<div class="empty-state"><div class="empty-icon">📋</div><h3>No leave applications</h3><p>Apply for leave using the button above</p></div>`}
+          </div>
+        </div>
+      `);
+      })
+      .getLeaveApplications({ employeeId: currentUser.id });
+  }
+
+  // ============================================================
+  // MY ATTENDANCE
+  // ============================================================
+  function renderMyAttendance() {
+    google.script.run
+      .withSuccessHandler(records => {
+        const cards = records.length
+          ? records.map(r => `<div class="att-month-card">${renderAttCard(r)}</div>`).join('')
+          : `<div class="empty-state"><div class="empty-icon">📅</div><h3>No attendance data yet</h3></div>`;
+        setContent(`
+        <div class="page-header"><h2>My Attendance</h2><p>Monthly attendance records</p></div>
+        <div class="stats-grid section-gap">
+          ${records.length ? (() => {
+            const totalP = records.reduce((s, r) => s + (parseInt(r.daysPresent) || 0), 0);
+            const totalA = records.reduce((s, r) => s + (parseInt(r.daysAbsent) || 0), 0);
+            const totalL = records.reduce((s, r) => s + (parseInt(r.approvedLeave) || 0), 0);
+            const totalW = records.reduce((s, r) => s + (parseInt(r.workingDays) || 0), 0);
+            return `
+              <div class="stat-card"><div class="stat-icon green">✅</div><div class="stat-info"><div class="stat-value">${totalP}</div><div class="stat-label">Days Present</div></div></div>
+              <div class="stat-card"><div class="stat-icon blue">📋</div><div class="stat-info"><div class="stat-value">${totalL}</div><div class="stat-label">Approved Leave</div></div></div>
+              <div class="stat-card"><div class="stat-icon red">❌</div><div class="stat-info"><div class="stat-value">${totalA}</div><div class="stat-label">Absences</div></div></div>
+              <div class="stat-card"><div class="stat-icon amber">📆</div><div class="stat-info"><div class="stat-value">${totalW}</div><div class="stat-label">Working Days</div></div></div>`;
+          })() : ''}
+        </div>
+        <div class="card">
+          <div class="card-header"><span class="card-title">Month-by-Month Breakdown</span></div>
+          <div class="card-body">
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px">${cards}</div>
+            <div class="att-legends" style="margin-top:16px">
+              <div class="att-legend"><div class="att-legend-dot" style="background:var(--success)"></div>Present</div>
+              <div class="att-legend"><div class="att-legend-dot" style="background:var(--accent)"></div>Approved Leave</div>
+              <div class="att-legend"><div class="att-legend-dot" style="background:var(--info)"></div>Medical</div>
+              <div class="att-legend"><div class="att-legend-dot" style="background:var(--danger)"></div>Absent</div>
+            </div>
+          </div>
+        </div>
+      `);
+      })
+      .getAttendance(currentUser.id, new Date().getFullYear());
+  }
+
+  function renderAttCard(r) {
+    const wd = parseInt(r.workingDays) || 1;
+    const pPct = Math.round(((parseInt(r.daysPresent) || 0) / wd) * 100);
+    const lPct = Math.round(((parseInt(r.approvedLeave) || 0) / wd) * 100);
+    const mPct = Math.round(((parseInt(r.medicalLeave) || 0) / wd) * 100);
+    const rmePct = Math.round(((parseInt(r.rejectedMedOrEmg) || 0) / wd) * 100);
+    const aPct = Math.min(100 - pPct - lPct - mPct - rmePct, Math.round(((parseInt(r.daysAbsent) || 0) / wd) * 100));
+    return `
+    <div>
+      <div class="att-month-name">
+        <span>${r.month} ${r.year}</span>
+        <span style="font-size:0.75rem;color:var(--text-3);font-weight:500">${r.workingDays} working days</span>
+      </div>
+      <div class="att-bars">
+        ${pPct > 0 ? `<div class="att-bar present" style="height:${pPct}%" title="Present: ${r.daysPresent}"></div>` : ''}
+        ${lPct > 0 ? `<div class="att-bar leave"   style="height:${lPct}%" title="Leave: ${r.approvedLeave}"></div>` : ''}
+        ${mPct > 0 ? `<div class="att-bar medical" style="height:${mPct}%" title="Medical: ${r.medicalLeave}"></div>` : ''}
+        ${rmePct > 0 ? `<div class="att-bar rejected-me" style="height:${rmePct}%" title="Rejected Med/Emg: ${r.rejectedMedOrEmg}"></div>` : ''}
+        ${aPct > 0 ? `<div class="att-bar absent"  style="height:${aPct}%" title="Absent: ${r.daysAbsent}"></div>` : ''}
+      </div>
+      <div class="att-stats-row">
+        <div class="att-stat-chip"><span style="color:var(--success)">✓</span>${r.daysPresent || 0} P</div>
+        <div class="att-stat-chip"><span style="color:var(--accent)">●</span>${r.approvedLeave || 0} L</div>
+        <div class="att-stat-chip"><span style="color:var(--info)">+</span>${r.medicalLeave || 0} M</div>
+        <div class="att-stat-chip"><span style="color:var(--warning)">✖</span>${r.rejectedMedOrEmg || 0} RME</div>
+        <div class="att-stat-chip"><span style="color:var(--danger)">✕</span>${r.daysAbsent || 0} A</div>
+      </div>
+    </div>`;
+  }
+
+  // ============================================================
+  // APPLY LEAVE
+  // ============================================================
+  function renderApplyLeave() {
+    const empOptions = canApplyForOthers()
+      ? allEmployees.map(e => `<option value="${e.id}" data-name="${e.name}">${e.name} (${e.id})</option>`).join('')
+      : `<option value="${currentUser.id}">${currentUser.name}</option>`;
+
+    setContent(`
+    <div class="page-header"><h2>Apply for Leave</h2><p>Fill in the details to submit your application</p></div>
+    <div class="card" style="max-width:600px">
+      <div class="card-body">
+        ${canApplyForOthers() ? `
+        <div class="form-group">
+          <label>Apply Leave For</label>
+          <select id="applyForEmp" onchange="syncApplyEmp(); updateLeaveInfo();">${empOptions}</select>
+        </div>` : ''}
+        <div class="form-group">
+          <label>Leave Type</label>
+          <select id="leaveType" onchange="updateLeaveInfo()">
+            <option value="Casual Leave">Casual Leave</option>
+            <option value="Medical Leave">Medical Leave (Doctor's certificate required)</option>
+            <option value="Emergency Leave">Emergency Leave</option>
+            <option value="Half Day">Half Day Leave</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Reference No</label>
+          <div style="display:flex;align-items:center;background:var(--bg-input);border:1.5px solid var(--border);border-radius:var(--r-sm);overflow:hidden;padding:0;box-shadow:var(--shadow-sm);transition:border-color 0.2s, box-shadow 0.2s">
+            <!-- GYWS Segment (Non-Editable) -->
+            <div style="background:var(--border);padding:11px 14px;color:var(--text-2);font-family:var(--font-mono);font-size:0.88rem;font-weight:700;user-select:none;border-right:1px solid var(--border)">GYWS</div>
+            <!-- Slash Separator -->
+            <div style="padding:0 8px;color:var(--text-3);font-family:var(--font-mono);font-size:0.9rem;font-weight:700;user-select:none">/</div>
+            <!-- L Segment (Non-Editable) -->
+            <div style="background:var(--border);padding:11px 14px;color:var(--text-2);font-family:var(--font-mono);font-size:0.88rem;font-weight:700;user-select:none;border-right:1px solid var(--border);border-left:1px solid var(--border)">L</div>
+            <!-- Slash Separator -->
+            <div style="padding:0 8px;color:var(--text-3);font-family:var(--font-mono);font-size:0.9rem;font-weight:700;user-select:none">/</div>
+            <!-- Number Input Box (Editable) -->
+            <input type="number" id="refNumInput" placeholder="e.g. 123" style="border:none;flex:1;background:none;padding:11px 14px;outline:none;font-family:var(--font-mono);font-size:0.9rem;font-weight:700;color:var(--text);text-align:center" min="1" onfocus="this.parentElement.style.borderColor='var(--accent)';this.parentElement.style.boxShadow='0 0 0 3px var(--accent-soft)';" onblur="this.parentElement.style.borderColor='var(--border)';this.parentElement.style.boxShadow='none';">
+            <!-- Slash Separator -->
+            <div style="padding:0 8px;color:var(--text-3);font-family:var(--font-mono);font-size:0.9rem;font-weight:700;user-select:none">/</div>
+            <!-- 2026 Segment (Non-Editable) -->
+            <div style="background:var(--border);padding:11px 14px;color:var(--text-2);font-family:var(--font-mono);font-size:0.88rem;font-weight:700;user-select:none;border-left:1px solid var(--border)">2026</div>
+          </div>
+        </div>
+        <div id="leaveInfoBox" class="error-msg" style="background:var(--info-bg);color:var(--info);border:1px solid var(--info);margin-bottom:12px;display:none"></div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>From Date</label>
+            <input type="date" id="fromDate" onchange="calcDays()" min="${minDate(2)}">
+          </div>
+          <div class="form-group">
+            <label>To Date</label>
+            <input type="date" id="toDate" onchange="calcDays()" min="${minDate(2)}">
+          </div>
+        </div>
+        <div id="daysCalc" style="color:var(--accent);font-weight:700;font-size:0.88rem;margin-bottom:12px;display:none">
+          📅 Total: <span id="daysCount">0</span> day(s)
+        </div>
+        <div class="form-group">
+          <label>Reason</label>
+          <textarea id="leaveReason" placeholder="Briefly describe the reason for leave..."></textarea>
+        </div>
+        <div id="applyError" class="error-msg hidden"></div>
+        <div style="display:flex;gap:12px;flex-wrap:wrap">
+          <button class="btn-primary" onclick="submitLeave()">Submit Application</button>
+          <button class="btn-secondary" onclick="navigate('myLeaves')">Cancel</button>
+        </div>
+      </div>
+    </div>
+  `);
+    // Set minimum dates
+    updateLeaveInfo();
+  }
+
+  function minDate(daysAhead) {
+    const offset = typeof daysAhead === 'number' ? daysAhead : 3;
+    const d = new Date();
+    d.setDate(d.getDate() + offset);
+    return d.toISOString().split('T')[0];
+  }
+
+  function updateLeaveInfo() {
+    const type = document.getElementById('leaveType')?.value;
+    const box = document.getElementById('leaveInfoBox');
+    const fromInput = document.getElementById('fromDate');
+    const toInput = document.getElementById('toDate');
+    if (!box) return;
+    let limit = 14;
+    const applyForEmpEl = document.getElementById('applyForEmp');
+    if (applyForEmpEl) {
+      const selectedEmpId = applyForEmpEl.value;
+      const emp = allEmployees.find(e => e.id === selectedEmpId);
+      limit = (emp && emp.role === 'office_staff') ? 20 : 14;
+    } else {
+      limit = (dashData && dashData.balance && dashData.balance.totalEntitled) || 14;
+    }
+    const msgs = {
+      'Casual Leave': `Must be applied at least 2 days in advance. Counts towards your ${limit}-day annual limit.`,
+      'Medical Leave': `Doctor's prescription or medical certificate is mandatory. Does NOT count in ${limit}-day limit.`,
+      'Emergency Leave': `For family emergencies/serious illness. Management discretion. Does NOT count in limit.`,
+      'Half Day': `Must be applied at least 2 days in advance. Half-day deduction = Base Salary ÷ 60. Counts as 0.5 days towards your ${limit}-day annual limit.`
+    };
+    box.textContent = msgs[type] || '';
+    box.style.display = msgs[type] ? 'block' : 'none';
+
+    // Relax date restriction for medical/emergency, set to 2 days for Casual/Half Day
+    if (fromInput && toInput) {
+      if (type === 'Medical Leave' || type === 'Emergency Leave') {
+        fromInput.min = '';
+        toInput.min = '';
+      } else if (type === 'Casual Leave' || type === 'Half Day') {
+        const minD = minDate(2);
+        fromInput.min = minD;
+        toInput.min = minD;
+      } else {
+        const minD = minDate(3);
+        fromInput.min = minD;
+        toInput.min = minD;
+      }
+    }
+
+    calcDays();
+  }
+
+  function calcDays() {
+    const from = document.getElementById('fromDate')?.value;
+    const to = document.getElementById('toDate')?.value;
+    const el = document.getElementById('daysCalc');
+    const cnt = document.getElementById('daysCount');
+    const type = document.getElementById('leaveType')?.value;
+    if (!from || !to || !el) return;
+
+    if (new Date(from) > new Date(to)) {
+      cnt.innerHTML = '<span style="color:var(--danger)">Invalid Range ("From Date" is after "To Date")</span>';
+      el.style.display = 'block';
+      return;
+    }
+
+    let diff = Math.round((new Date(to) - new Date(from)) / 86400000) + 1;
+    if (type === 'Half Day') {
+      diff = 0.5;
+    }
+    if (diff > 0) { cnt.textContent = diff; el.style.display = 'block'; }
+    else { el.style.display = 'none'; }
+  }
+
+  function syncApplyEmp() {
+    // Admin is applying on behalf — no extra logic needed (name pulled from select)
+  }
+
+  function submitLeave() {
+    const type = document.getElementById('leaveType')?.value;
+    const from = document.getElementById('fromDate')?.value;
+    const to = document.getElementById('toDate')?.value;
+    const reason = document.getElementById('leaveReason')?.value.trim();
+    const refNum = document.getElementById('refNumInput')?.value.trim();
+    const errEl = document.getElementById('applyError');
+
+    if (!from || !to || !reason || !refNum) { errEl.textContent = 'Please fill all fields, including the Reference Number.'; errEl.classList.remove('hidden'); return; }
+
+    if (new Date(from) > new Date(to)) {
+      errEl.textContent = '❌ "From Date" cannot be after "To Date".';
+      errEl.classList.remove('hidden');
+      return;
+    }
+
+    if (isNaN(parseInt(refNum)) || parseInt(refNum) <= 0) {
+      errEl.textContent = 'Please enter a valid Reference Number.';
+      errEl.classList.remove('hidden');
+      return;
+    }
+    const referenceNo = 'GYWS/L/' + parseInt(refNum) + '/2026';
+
+    errEl.classList.add('hidden');
+
+    let days = Math.round((new Date(to) - new Date(from)) / 86400000) + 1;
+    if (type === 'Half Day') {
+      days = 0.5;
+    }
+    let empId = currentUser.id, empName = currentUser.name;
+    if (canApplyForOthers() && document.getElementById('applyForEmp')) {
+      const sel = document.getElementById('applyForEmp');
+      empId = sel.value;
+      empName = sel.options[sel.selectedIndex].dataset.name;
+    }
+
+    const payload = {
+      employeeId: empId,
+      employeeName: empName,
+      appliedBy: currentUser.id,
+      leaveType: type,
+      fromDate: from,
+      toDate: to,
+      totalDays: days,
+      reason: reason,
+      isHalfDay: type === 'Half Day' ? 'TRUE' : 'FALSE',
+      referenceNo: referenceNo
+    };
+
+    google.script.run
+      .withSuccessHandler(r => {
+        if (r.success) {
+          showToast('✅ ' + r.message, 'success');
+          navigate('myLeaves');
+        } else {
+          errEl.textContent = r.message; errEl.classList.remove('hidden');
+        }
+      })
+      .submitLeaveApplication(payload);
+  }
+
+  // ============================================================
+  // ALL LEAVES (ADMIN)
+  // ============================================================
+  function formatSheetDate(val) {
+    if (!val) return '';
+    // Google Sheets may return a Date object or a string like "2025-04-03"
+    if (val instanceof Date) return val.toLocaleDateString('en-IN');
+    const d = new Date(val);
+    return isNaN(d.getTime()) ? String(val) : d.toLocaleDateString('en-IN');
+  }
+
+  function sanitizeLeaves(leaves) {
+    return (leaves || []).map(l => ({
+      ...l,
+      appId: String(l.appId || ''),
+      employeeId: String(l.employeeId || ''),
+      employeeName: String(l.employeeName || ''),
+      leaveType: String(l.leaveType || ''),
+      totalDays: l.totalDays != null ? l.totalDays : '',
+      reason: String(l.reason || ''),
+      status: String(l.status || '').trim(),
+      approvedBy: String(l.approvedBy || ''),
+      adminNote: String(l.adminNote || ''),
+      markedAbsent: String(l.markedAbsent || '').trim().toUpperCase(),
+      fromDate: formatSheetDate(l.fromDate),
+      toDate: formatSheetDate(l.toDate),
+      appliedOn: formatSheetDate(l.appliedOn),
+      approvedOn: formatSheetDate(l.approvedOn),
+    }));
+  }
+
+  function renderAllLeaves() {
+    google.script.run
+      .withSuccessHandler(rawLeaves => {
+        const leaves = sanitizeLeaves(rawLeaves);
+        document.getElementById('pendingBadge').textContent = leaves.filter(l => l.status === 'Pending').length || '';
+
+        const pageTitle = canApproveLeave()
+          ? 'Review, approve, or reject employee leave requests'
+          : 'View all employee leave requests (read-only)';
+
+        const rows = leaves.map(l => buildLeaveRow(l)).join('');
+
+        setContent(`
+        <div class="page-header">
+          <h2>All Leave Applications</h2>
+          <p>${pageTitle}</p>
+          ${!canApproveLeave() ? `<p style="margin-top:6px;font-size:0.78rem;color:var(--warning);font-weight:600">⚠️ You have view-only access. Contact HR or GB to approve/reject leaves.</p>` : ''}
+        </div>
+        <div class="filter-bar">
+          <select id="filterStatus" onchange="filterLeaves()">
+            <option value="">All Status</option>
+            <option value="Pending" selected>Pending</option>
+            <option value="Approved">Approved</option>
+            <option value="Rejected">Rejected</option>
+          </select>
+          <input type="text" id="filterName" placeholder="Search employee..." onkeyup="filterLeaves()" style="flex:1">
+        </div>
+        <div class="card">
+          <div class="card-body">
+            ${leaves.length ? `<div class="table-wrap"><table id="leavesTable">
+              <thead><tr>
+                <th>App ID</th><th>Employee</th><th>Type</th>
+                <th>From</th><th>To</th><th>Days</th>
+                <th>Applied On</th><th>Status</th><th>Actions</th>
+              </tr></thead>
+              <tbody id="leavesBody">${rows}</tbody>
+            </table></div>` : `<div class="empty-state"><div class="empty-icon">📭</div><h3>No applications found</h3></div>`}
+          </div>
+        </div>
+      `);
+        // Store full data then immediately filter to Pending
+        window._allLeavesData = leaves;
+        filterLeaves();
+      })
+      .getLeaveApplications({});
+  }
+
+  function buildLeaveRow(l) {
+    // Approve/Reject buttons only shown to super_admin and hr
+    const actionBtns = canApproveLeave() && l.status === 'Pending'
+      ? `<button class="btn-success btn-sm" onclick="quickApprove('${l.appId}')">✓</button>
+       <button class="btn-danger btn-sm" style="margin-left:4px" onclick="quickReject('${l.appId}')">✕</button>`
+      : '';
+
+    // Mark Present/Absent buttons for rejected casual leaves with PENDING status
+    const isCasualType = (l.leaveType === 'Casual Leave' || l.leaveType === 'Half Day');
+    const isPendingMark = (l.markedAbsent === 'PENDING' || l.markedAbsent === '' || l.markedAbsent === 'FALSE');
+    const markBtns = canApproveLeave() && l.status === 'Rejected' && isCasualType && isPendingMark
+      ? `<button class="btn-success btn-sm" style="margin-left:4px;font-size:0.65rem" onclick="markRejectedCasual('${l.appId}','PRESENT')" title="Employee came to work — scrapped">✓ Present</button>
+       <button class="btn-danger btn-sm" style="margin-left:4px;font-size:0.65rem" onclick="markRejectedCasual('${l.appId}','ABSENT')" title="Employee was absent — counts in limit + 0.5 penalty">✕ Absent</button>`
+      : '';
+
+    // Show marking status for already-marked rejected casual leaves
+    let markLabel = '';
+    if (l.status === 'Rejected' && isCasualType && !isPendingMark) {
+      markLabel = l.markedAbsent === 'PRESENT'
+        ? '<span style="font-size:0.65rem;color:var(--success);font-weight:600;margin-left:4px">✓ Present</span>'
+        : '<span style="font-size:0.65rem;color:var(--danger);font-weight:600;margin-left:4px">✕ Absent</span>';
+    }
+
+    return `
+    <tr>
+      <td><span style="font-family:var(--font-mono);font-size:0.78rem">${l.appId}</span></td>
+      <td><strong>${l.employeeName}</strong><div style="font-size:0.72rem;color:var(--text-3)">${l.employeeId}</div></td>
+      <td>${l.leaveType}</td>
+      <td>${l.fromDate}</td><td>${l.toDate}</td><td>${l.totalDays}</td>
+      <td>${l.appliedOn}</td>
+      <td><span class="badge badge-${l.status.toLowerCase()}">${l.status}</span>${markLabel}</td>
+      <td>
+        ${actionBtns}${markBtns}
+        <button class="btn-secondary btn-sm" style="margin-left:${(actionBtns || markBtns) ? '4px' : '0'}" onclick="viewLeaveDetail('${l.appId}')">Detail</button>
+      </td>
+    </tr>`;
+  }
+
+  function filterLeaves() {
+    const status = document.getElementById('filterStatus')?.value;
+    const name = (document.getElementById('filterName')?.value || '').toLowerCase();
+    const leaves = (window._allLeavesData || []).filter(l =>
+      (!status || l.status === status) &&
+      (!name || l.employeeName.toLowerCase().includes(name))
+    );
+    const body = document.getElementById('leavesBody');
+    if (body) body.innerHTML = leaves.map(l => buildLeaveRow(l)).join('') ||
+      `<tr><td colspan="9" class="no-data">No matching records</td></tr>`;
+  }
+
+  function quickApprove(appId) { showApprovalModal(appId, 'Approved'); }
+  function quickReject(appId) { showApprovalModal(appId, 'Rejected'); }
+
+  function showApprovalModal(appId, decision) {
+    const all = window._allLeavesData || dashData?.allLeaves || dashData?.myLeaves || [];
+    const leave = all.find(l => l.appId === appId);
+    const isCasual = leave && (leave.leaveType === 'Casual Leave' || leave.leaveType === 'Half Day');
+
+    document.getElementById('modalTitle').textContent = `${decision === 'Approved' ? '✅ Approve' : '❌ Reject'} Leave — ${appId}`;
+
+    let casualNote = '';
+    if (decision === 'Rejected' && isCasual) {
+      const emp = allEmployees.find(e => e.id === leave.employeeId);
+      const limit = (emp && emp.role === 'office_staff') ? 20 : 14;
+      casualNote = `
+      <div style="margin-bottom:16px; padding:12px; border-left:4px solid var(--warning); background:var(--bg);border-radius:6px;">
+        <strong style="color:var(--warning)">⚠️ Rejected Casual Leave Notice</strong>
+        <p style="margin:6px 0 0;font-size:0.82rem;color:var(--text-2)">This leave will be marked as <strong>Rejected Casual (Pending)</strong>. You can later mark whether the employee was Present (scrapped) or Absent (counted in ${limit}-day limit + 0.5 penalty) from All Applications.</p>
+      </div>
+    `;
+    }
+
+    document.getElementById('modalBody').innerHTML = `
+    ${casualNote}
+    <div class="form-group" style="margin-bottom:16px">
+      <label>Admin Note (optional)</label>
+      <textarea id="adminNote" placeholder="Add a note for the employee..." style="min-height:80px"></textarea>
+    </div>
+    <div style="display:flex;gap:10px">
+      <button class="${decision === 'Approved' ? 'btn-success' : 'btn-danger'} btn-primary" onclick="confirmDecision('${appId}','${decision}', ${isCasual})">
+        Confirm ${decision}
+      </button>
+      <button class="btn-secondary" onclick="closeModal()">Cancel</button>
+    </div>`;
+    document.getElementById('modal').classList.remove('hidden');
+  }
+
+  function confirmDecision(appId, decision, isCasual) {
+    const note = document.getElementById('adminNote')?.value || '';
+    const markAbsent = false; // No longer auto-marked; admin marks later
+    const btn = document.querySelector('#modalBody .btn-primary');
+    if (btn) { btn.disabled = true; btn.textContent = 'Processing...'; }
+
+    google.script.run
+      .withFailureHandler(err => {
+        closeModal();
+        showToast('❌ Error: ' + (err.message || 'Something went wrong'), 'error');
+      })
+      .withSuccessHandler(r => {
+        closeModal();
+        if (!r.success) { showToast('❌ ' + r.message, 'error'); return; }
+
+        // ── Update in-memory cache ──────────────────────────────
+        if (window._allLeavesData) {
+          const app = window._allLeavesData.find(l => l.appId === appId);
+          if (app) {
+            app.status = decision;
+            app.approvedBy = currentUser.id;
+            app.approvedOn = new Date().toLocaleDateString('en-IN');
+            app.adminNote = note;
+            app.markAbsent = markAbsent;
+          }
+        }
+        // Also update dashData if present
+        if (dashData && dashData.allLeaves) {
+          const app = dashData.allLeaves.find(l => l.appId === appId);
+          if (app) {
+            app.status = decision;
+            app.approvedBy = currentUser.id;
+            app.adminNote = note;
+            app.markAbsent = markAbsent;
+          }
+          dashData.pendingLeaves = (dashData.allLeaves || []).filter(l => l.status === 'Pending');
+        }
+
+        // ── Update table row in-place (zero re-fetch) ──────────
+        document.querySelectorAll('#leavesBody tr').forEach(row => {
+          if (row.innerHTML.includes(appId)) {
+            const badge = row.querySelector('.badge');
+            if (badge) { badge.className = 'badge badge-' + decision.toLowerCase(); badge.textContent = decision; }
+            row.querySelectorAll('.btn-success, .btn-danger').forEach(b => b.remove());
+          }
+        });
+
+        // ── Update pending badge ────────────────────────────────
+        const allData = window._allLeavesData || (dashData && dashData.allLeaves) || [];
+        const pendingCount = allData.filter(l => l.status === 'Pending').length;
+        const badge = document.getElementById('pendingBadge');
+        if (badge) badge.textContent = pendingCount || '';
+
+        showToast('✅ ' + r.message, 'success');
+
+        // Auto reload current page view to refresh balances
+        if (currentPage === 'dashboard') renderDashboard();
+        else if (currentPage === 'allLeaves') renderAllLeaves();
+      })
+      .approveRejectLeave(appId, decision, currentUser.id, note, currentUser.name, currentUser.email, markAbsent);
+  }
+
+  function markRejectedCasual(appId, outcome) {
+    showToast('Processing marking...', 'warning');
+    google.script.run
+      .withFailureHandler(err => {
+        showToast('❌ Error: ' + (err.message || 'Something went wrong'), 'error');
+      })
+      .withSuccessHandler(r => {
+        if (!r.success) {
+          showToast('❌ ' + r.message, 'error');
+          return;
+        }
+        showToast('✅ ' + r.message, 'success');
+
+        // Update in-memory caches
+        if (window._allLeavesData) {
+          const app = window._allLeavesData.find(l => l.appId === appId);
+          if (app) {
+            app.markedAbsent = outcome;
+          }
+        }
+        if (dashData && dashData.allLeaves) {
+          const app = dashData.allLeaves.find(l => l.appId === appId);
+          if (app) {
+            app.markedAbsent = outcome;
+          }
+        }
+
+        // Re-render the view
+        if (currentPage === 'dashboard') renderDashboard();
+        else if (currentPage === 'allLeaves') renderAllLeaves();
+      })
+      .markRejectedCasualOutcome(appId, outcome, currentUser.id);
+  }
+
+  function viewLeaveDetail(appId) {
+    const all = window._myLeavesData || window._allLeavesData || dashData?.allLeaves || dashData?.myLeaves || [];
+    const leave = all.find(l => l.appId === appId);
+    if (!leave) return;
+    document.getElementById('modalTitle').textContent = `Leave Detail — ${appId}`;
+    document.getElementById('modalBody').innerHTML = `
+    <div class="salary-result">
+      ${detailRow('Employee', leave.employeeName + ' (' + leave.employeeId + ')')}
+      ${leave.referenceNo ? detailRow('Reference No', `<span style="font-family:var(--font-mono);font-weight:700">${leave.referenceNo}</span>`) : ''}
+      ${(() => {
+        const applicantEmp = allEmployees.find(e => e.id === leave.appliedBy);
+        let applicantName = '';
+        if (applicantEmp) {
+          applicantName = applicantEmp.name;
+        } else if (currentUser && leave.appliedBy === currentUser.id) {
+          applicantName = currentUser.name;
+        }
+        return detailRow('Applied By', leave.appliedBy + (applicantName ? ' (' + applicantName + ')' : ''));
+      })()}
+      ${detailRow('Leave Type', leave.leaveType)}
+      ${detailRow('From Date', leave.fromDate)}
+      ${detailRow('To Date', leave.toDate)}
+      ${detailRow('Total Days', leave.totalDays + ' day(s)')}
+      ${detailRow('Reason', leave.reason)}
+      ${detailRow('Status', `<span class="badge badge-${leave.status.toLowerCase()}">${leave.status}</span>`)}
+      ${detailRow('Applied On', leave.appliedOn)}
+      ${leave.approvedBy ? detailRow('Actioned By', leave.approvedBy) : ''}
+      ${leave.approvedOn ? detailRow('Actioned On', leave.approvedOn) : ''}
+      ${leave.adminNote ? detailRow('Admin Note', leave.adminNote) : ''}
+    </div>
+    <div style="display:flex;gap:10px;margin-top:16px;align-items:center;flex-wrap:wrap">
+      ${canApproveLeave() && leave.status === 'Pending' ? `
+        <button class="btn-success btn-sm" onclick="closeModal();quickApprove('${appId}')">✓ Approve</button>
+        <button class="btn-danger btn-sm"  onclick="closeModal();quickReject('${appId}')">✕ Reject</button>
+      ` : ''}
+      ${currentUser.role === 'super_admin' ? `
+        <button class="btn-danger btn-sm" style="margin-left:auto;background:#ea4335;" onclick="deleteLeaveApplication('${appId}')">🗑️ Delete Application</button>
+      ` : ''}
+      <button class="btn-secondary btn-sm" onclick="closeModal()" style="margin-left:${currentUser.role === 'super_admin' ? '0' : 'auto'}">Close</button>
+    </div>`;
+    document.getElementById('modal').classList.remove('hidden');
+  }
+
+  function deleteLeaveApplication(appId) {
+    if (!confirm('⚠️ Are you sure you want to permanently DELETE leave application ' + appId + '? This action cannot be undone and will revert all attendance and balance counts.')) {
+      return;
+    }
+    closeModal();
+    showToast('Deleting leave application...', 'warning');
+    google.script.run
+      .withFailureHandler(err => {
+        showToast('❌ Error: ' + (err.message || 'Something went wrong'), 'error');
+      })
+      .withSuccessHandler(r => {
+        if (!r.success) {
+          showToast('❌ ' + r.message, 'error');
+          return;
+        }
+        showToast('✅ ' + r.message, 'success');
+
+        // Update in-memory caches
+        if (window._allLeavesData) {
+          window._allLeavesData = window._allLeavesData.filter(l => l.appId !== appId);
+        }
+        if (window._myLeavesData) {
+          window._myLeavesData = window._myLeavesData.filter(l => l.appId !== appId);
+        }
+        if (dashData && dashData.allLeaves) {
+          dashData.allLeaves = dashData.allLeaves.filter(l => l.appId !== appId);
+          dashData.pendingLeaves = dashData.pendingLeaves.filter(l => l.appId !== appId);
+        }
+        if (dashData && dashData.myLeaves) {
+          dashData.myLeaves = dashData.myLeaves.filter(l => l.appId !== appId);
+        }
+
+        // Re-render the view
+        if (currentPage === 'dashboard') renderDashboard();
+        else if (currentPage === 'allLeaves') renderAllLeaves();
+        else if (currentPage === 'myLeaves') renderMyLeaves();
+      })
+      .deleteLeaveApplicationBackend(appId, currentUser.id);
+  }
+
+  function detailRow(label, val) {
+    return `<div class="salary-row"><span style="color:var(--text-3);font-size:0.8rem;font-weight:600">${label}</span><span style="font-weight:600">${val}</span></div>`;
+  }
+
+  // ============================================================
+  // ATTENDANCE ENTRY (Admin / HR)
+  // ============================================================
+  function renderAttendanceEntry() {
+    const empOptions = allEmployees.map(e => `<option value="${e.id}" data-name="${e.name}">${e.name} (${e.id})</option>`).join('');
+    const monthOptions = MONTHS.map((m, i) => `<option value="${m}" ${i === new Date().getMonth() ? 'selected' : ''}>${m}</option>`).join('');
+    const monthOptionsView = MONTHS.map((m, i) => `<option value="${m}" ${i === new Date().getMonth() ? 'selected' : ''}>${m}</option>`).join('');
+
+    // Build tabs based on role — only office_staff and super_admin see "View All Attendance"
+    const showViewAllTab = canViewAllAttendance();
+
+    setContent(`
+    <div class="page-header"><h2>Attendance</h2><p>Enter and view employee attendance records</p></div>
+
+    <!-- TAB BAR -->
+    <div style="display:flex;gap:8px;margin-bottom:20px;border-bottom:2px solid var(--border);padding-bottom:0">
+      <button id="tabEntry" onclick="switchAttTab('entry')"
+        style="padding:10px 20px;font-weight:700;font-size:0.88rem;background:none;border:none;border-bottom:3px solid var(--accent);color:var(--accent);cursor:pointer;margin-bottom:-2px">
+        ✏️ Enter Attendance
+      </button>
+      ${showViewAllTab ? `
+      <button id="tabView" onclick="switchAttTab('view')"
+        style="padding:10px 20px;font-weight:600;font-size:0.88rem;background:none;border:none;border-bottom:3px solid transparent;color:var(--text-3);cursor:pointer;margin-bottom:-2px">
+        👁️ View All Attendance
+      </button>` : ''}
+    </div>
+
+    <!-- TAB: ENTRY -->
+    <div id="attTabEntry">
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-header"><span class="card-title">Single Employee Entry</span></div>
+          <div class="card-body">
+            <div class="form-group"><label>Employee</label><select id="attEmpId" onchange="fetchLeavePrefill()">${empOptions}</select></div>
+            <div class="form-row">
+              <div class="form-group"><label>Month</label><select id="attMonth" onchange="fetchLeavePrefill()">${monthOptions}</select></div>
+              <div class="form-group"><label>Year</label><input
+  type="number"
+  id="attYear"
+  onchange="fetchLeavePrefill()" value="${new Date().getFullYear()}"></div>
+            </div>
+            <div class="form-row">
+              <div class="form-group"><label>Working Days</label><input
+  type="number"
+  id="attWD"
+  oninput="autoCalcAbsent()" min="0" max="31" placeholder="26"></div>
+              <div class="form-group"><label>Days Present</label><input
+  type="number"
+  id="attPresent"
+  oninput="autoCalcAbsent()" min="0" max="31" placeholder="24"></div>
+            </div>
+            <div class="form-row">
+              <div class="form-group"><label>Approved Leave</label><input
+  type="number"
+  id="attLeave"
+  readonly min="0" value="0"></div>
+              <div class="form-group"><label>Medical Leave</label><input
+  type="number"
+  id="attMedical"
+  readonly min="0" value="0"></div>
+            </div>
+            <div class="form-row">
+              <div class="form-group"><label>Emergency Leave</label><input
+  type="number"
+  id="attEmergency"
+  readonly
+ min="0" value="0"></div>
+              <div class="form-group"><label>Days Absent <span style="font-size:0.68rem;font-weight:600;color:var(--accent);background:var(--accent-light);padding:2px 7px;border-radius:10px">Auto</span></label><input type="number" id="attAbsent" min="0" value="0" readonly style="background:var(--bg);color:var(--accent);font-weight:700" title="Auto-calculated: Rejected Casual Leave + Remaining Absent"></div>
+            </div>
+            <div
+              style="
+                margin-top: 4px;
+                margin-bottom: 16px;
+                padding: 12px 16px;
+                border-radius: var(--r-sm);
+                background: var(--bg-input);
+                border: 1px solid var(--border);
+                font-size: 0.85rem;
+                display: flex;
+                flex-direction: column;
+                gap: 8px;
+                box-shadow: var(--shadow-sm);
+              "
+            >
+              <div style="display: flex; justify-content: space-between; align-items: center;">
+                <span><strong>Rejected Casual Leave:</strong> <span style="font-size:0.75rem;color:var(--text-3);font-weight:500;">(counted as absent)</span></span>
+                <span id="rejectedCasualLeaveCount" style="font-weight:800;color:var(--danger);font-family:var(--font-mono);font-size:0.95rem;">0</span>
+              </div>
+              <div style="height: 1px; background: var(--border); margin: 2px 0;"></div>
+              <div style="display: flex; justify-content: space-between; align-items: center;">
+                <span><strong>Rejected Medical/Emergency Leave:</strong> <span id="rmeLimitLabel" style="font-size:0.75rem;color:var(--text-3);font-weight:500;">(no penalty, counted under 14)</span></span>
+                <span id="rejectedMedOrEmgLeaveCount" style="font-weight:800;color:var(--accent);font-family:var(--font-mono);font-size:0.95rem;">0</span>
+              </div>
+            </div>
+            <div id="attError" class="error-msg hidden"></div>
+            <button class="btn-primary" onclick="saveAttendance()">Save Attendance</button>
+          </div>
+        </div>
+
+        <!-- Bulk Extract Card (Super Admin only) -->
+        ${currentUser.role === 'super_admin' ? `
+        <div class="card" style="margin-top:20px;border-top:3px solid var(--accent);box-shadow:var(--shadow-md);">
+          <div class="card-header"><span class="card-title">🔌 Bulk Extract from External Sheet</span></div>
+          <div class="card-body">
+            <p style="font-size:0.8rem;color:var(--text-3);margin-bottom:12px">
+              Import all employee attendance records from the external Google Sheet tracker.
+            </p>
+            <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+              <div class="form-group" style="margin:0;flex:1;min-width:120px">
+                <label style="font-size:0.75rem;margin-bottom:4px">Month</label>
+                <select id="extractMonthEntry">${monthOptions}</select>
+              </div>
+              <div class="form-group" style="margin:0;width:90px">
+                <label style="font-size:0.75rem;margin-bottom:4px">Year</label>
+                <input type="number" id="extractYearEntry" value="${new Date().getFullYear()}">
+              </div>
+              <button class="btn-primary" onclick="triggerExtraction('Entry')" style="height:38px;padding:0 16px">⚡ Extract</button>
+            </div>
+            <div id="extractStatusEntry" style="margin-top:10px;font-size:0.82rem;font-weight:600;display:none"></div>
+          </div>
+        </div>` : ''}
+        <div class="card">
+          <div class="card-header"><span class="card-title">Current Month Overview</span>
+            <button class="btn-secondary btn-sm" onclick="loadCurrentAtt()">Refresh</button>
+          </div>
+          <div class="card-body" id="currentAttView">
+            <div class="empty-state"><div class="empty-icon">📅</div><h3>Click Refresh to load</h3></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB: VIEW ALL — only rendered for office_staff and super_admin -->
+    ${showViewAllTab ? `
+    <div id="attTabView" style="display:none">
+      <div class="card section-gap">
+        <div class="card-header">
+          <span class="card-title">All Employee Attendance</span>
+          <button class="btn-primary btn-sm" onclick="loadAllAtt()">🔍 Load</button>
+        </div>
+        <div class="card-body">
+          <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px">
+            <div class="form-group" style="margin:0;flex:1;min-width:140px">
+              <label>Month</label>
+              <select id="viewAttMonth">${monthOptionsView}</select>
+            </div>
+            <div class="form-group" style="margin:0;width:100px">
+              <label>Year</label>
+              <input type="number" id="viewAttYear" value="${new Date().getFullYear()}">
+            </div>
+            <div class="form-group" style="margin:0;flex:1;min-width:160px">
+              <label>Search Employee</label>
+              <input type="text" id="viewAttSearch" placeholder="Name or ID..." oninput="filterAttTable()">
+            </div>
+          </div>
+          <div id="allAttView">
+            <div class="empty-state"><div class="empty-icon">📅</div><h3>Select month & year, then click Load</h3></div>
+          </div>
+        </div>
+      </div>
+    </div>` : ''}
+  `);
+  }
+
+  function switchAttTab(tab) {
+    const entry = document.getElementById('attTabEntry');
+    const view = document.getElementById('attTabView');
+    const tabEntry = document.getElementById('tabEntry');
+    const tabView = document.getElementById('tabView');
+    if (tab === 'entry') {
+      entry.style.display = 'block';
+      if (view) view.style.display = 'none';
+      tabEntry.style.borderBottomColor = 'var(--accent)'; tabEntry.style.color = 'var(--accent)'; tabEntry.style.fontWeight = '700';
+      if (tabView) { tabView.style.borderBottomColor = 'transparent'; tabView.style.color = 'var(--text-3)'; tabView.style.fontWeight = '600'; }
+    } else {
+      entry.style.display = 'none';
+      if (view) view.style.display = 'block';
+      if (tabView) { tabView.style.borderBottomColor = 'var(--accent)'; tabView.style.color = 'var(--accent)'; tabView.style.fontWeight = '700'; }
+      tabEntry.style.borderBottomColor = 'transparent'; tabEntry.style.color = 'var(--text-3)'; tabEntry.style.fontWeight = '600';
+    }
+  }
+
+  function loadAllAtt() {
+    const month = document.getElementById('viewAttMonth').value;
+    const year = parseInt(document.getElementById('viewAttYear').value);
+    const view = document.getElementById('allAttView');
+    view.innerHTML = '<div class="loading-screen" style="min-height:120px"><div class="loader-ring"></div><p>Loading...</p></div>';
+    google.script.run
+      .withSuccessHandler(records => {
+        window._allAttData = records;
+        renderAttTable(records, month, year);
+      })
+      .getAllAttendance(month, year);
+  }
+
+  function filterAttTable() {
+    if (!window._allAttData) return;
+    const q = (document.getElementById('viewAttSearch')?.value || '').toLowerCase();
+    const filtered = window._allAttData.filter(r =>
+      r.employeeName.toLowerCase().includes(q) || r.employeeId.toLowerCase().includes(q)
+    );
+    const month = document.getElementById('viewAttMonth')?.value || '';
+    const year = parseInt(document.getElementById('viewAttYear')?.value) || new Date().getFullYear();
+    renderAttTable(filtered, month, year);
+  }
+
+  function renderAttTable(records, month, year) {
+    const view = document.getElementById('allAttView');
+    if (!view) return;
+    if (!records.length) {
+      view.innerHTML = `<div class="empty-state"><div class="empty-icon">📅</div><h3>No attendance data for ${month} ${year}</h3></div>`;
+      return;
+    }
+    const totalPresent = records.reduce((s, r) => s + (parseInt(r.daysPresent) || 0), 0);
+    const totalAbsent = records.reduce((s, r) => s + (parseInt(r.daysAbsent) || 0), 0);
+    const totalLeave = records.reduce((s, r) => s + (parseInt(r.approvedLeave) || 0), 0);
+    view.innerHTML = `
+    <div class="stats-grid" style="margin-bottom:16px">
+      <div class="stat-card">
+        <div class="stat-icon blue">👥</div>
+        <div class="stat-info"><div class="stat-value">${records.length}</div><div class="stat-label">Employees</div></div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon green">✅</div>
+        <div class="stat-info"><div class="stat-value">${totalPresent}</div><div class="stat-label">Total Present Days</div></div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon blue">📋</div>
+        <div class="stat-info"><div class="stat-value">${totalLeave}</div><div class="stat-label">Total Leave Days</div></div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon red">❌</div>
+        <div class="stat-info"><div class="stat-value">${totalAbsent}</div><div class="stat-label">Total Absent Days</div></div>
+      </div>
+    </div>
+    <div class="table-wrap"><table>
+      <thead><tr>
+        <th>Employee</th><th>Working Days</th><th>Present</th>
+        <th>Approved Leave</th><th>Medical</th><th>Emergency</th><th>Rejected Med/Emg</th><th>Absent</th><th>Attendance %</th>
+      </tr></thead>
+      <tbody>
+        ${records.map(r => {
+      const wd = parseInt(r.workingDays) || 1;
+      const pct = Math.round(((parseInt(r.daysPresent) || 0) / wd) * 100);
+      const color = pct >= 90 ? 'var(--success)' : pct >= 75 ? 'var(--warning)' : 'var(--danger)';
+      return `<tr>
+            <td><strong>${r.employeeName}</strong><div style="font-size:0.72rem;color:var(--text-3)">${r.employeeId}</div></td>
+            <td style="text-align:center">${r.workingDays}</td>
+            <td style="text-align:center;color:var(--success);font-weight:700">${r.daysPresent || 0}</td>
+            <td style="text-align:center;color:var(--accent)">${r.approvedLeave || 0}</td>
+            <td style="text-align:center;color:var(--info)">${r.medicalLeave || 0}</td>
+            <td style="text-align:center;color:var(--warning)">${r.emergencyLeave || 0}</td>
+            <td style="text-align:center;color:var(--warning);font-weight:600">${r.rejectedMedOrEmg || 0}</td>
+            <td style="text-align:center;color:var(--danger);font-weight:700">${r.daysAbsent || 0}</td>
+            <td style="text-align:center">
+              <span style="font-weight:700;color:${color}">${pct}%</span>
+              <div style="height:4px;background:var(--border);border-radius:2px;margin-top:4px;width:60px">
+                <div style="height:100%;width:${pct}%;background:${color};border-radius:2px"></div>
+              </div>
+            </td>
+          </tr>`;
+    }).join('')}
+      </tbody>
+    </table></div>`;
+  }
+
+  function autoCalcAbsent() {
+    const wd = parseInt(document.getElementById('attWD')?.value) || 0;
+    const present = parseInt(document.getElementById('attPresent')?.value) || 0;
+    const approved = parseInt(document.getElementById('attLeave')?.value) || 0;
+    const medical = parseInt(document.getElementById('attMedical')?.value) || 0;
+    const emergency = parseInt(document.getElementById('attEmergency')?.value) || 0;
+    const rejectedCasual = parseFloat(document.getElementById('rejectedCasualLeaveCount')?.textContent) || 0;
+    const rejectedMedOrEmg = parseFloat(document.getElementById('rejectedMedOrEmgLeaveCount')?.textContent) || 0;
+
+    const totalRejected = rejectedCasual + rejectedMedOrEmg;
+    let remainingAbsent = wd - present - approved - medical - emergency - totalRejected;
+    if (remainingAbsent < 0) remainingAbsent = 0;
+
+    const daysAbsent = rejectedCasual + remainingAbsent;
+    const absentInput = document.getElementById('attAbsent');
+    if (absentInput) {
+      absentInput.value = daysAbsent;
+    }
+
+    const errEl = document.getElementById('attError');
+    if (!errEl) return true;
+
+    if (present + approved + medical + emergency + totalRejected > wd) {
+      errEl.textContent = `Total counted days exceed working days.`;
+      errEl.classList.remove('hidden');
+      return false;
+    }
+
+    errEl.classList.add('hidden');
+    return true;
+  }
+  function fetchLeavePrefill() {
+    const empEl = document.getElementById('attEmpId');
+    const monthEl = document.getElementById('attMonth');
+    const yearEl = document.getElementById('attYear');
+
+    if (!empEl || !monthEl || !yearEl) return;
+
+    const employeeId = empEl.value;
+    const month = monthEl.value;
+    const year = yearEl.value;
+
+    if (!employeeId || !month || !year) return;
+
+    google.script.run
+      .withSuccessHandler(res => {
+        if (!res || !res.success) return;
+
+        const approvedEl = document.getElementById('attLeave');
+        const medicalEl = document.getElementById('attMedical');
+        const emergencyEl = document.getElementById('attEmergency');
+
+        if (approvedEl) approvedEl.value = res.approvedLeave || 0;
+        if (medicalEl) medicalEl.value = res.medicalLeave || 0;
+        if (emergencyEl) emergencyEl.value = res.emergencyLeave || 0;
+
+        const rejectedCasualEl = document.getElementById('rejectedCasualLeaveCount');
+        const rejectedMedOrEmgEl = document.getElementById('rejectedMedOrEmgLeaveCount');
+
+        if (rejectedCasualEl) rejectedCasualEl.textContent = res.rejectedCasualLeave || 0;
+        if (rejectedMedOrEmgEl) rejectedMedOrEmgEl.textContent = res.rejectedMedOrEmgLeave || 0;
+
+        const emp = allEmployees.find(e => e.id === employeeId);
+        const limit = (emp && emp.role === 'office_staff') ? 20 : 14;
+        const rmeLimitLabelEl = document.getElementById('rmeLimitLabel');
+        if (rmeLimitLabelEl) rmeLimitLabelEl.textContent = `(no penalty, counted under ${limit})`;
+
+        autoCalcAbsent();
+      })
+      .getAttendancePrefillData(employeeId, month, year);
+  }
+  function saveAttendance() {
+    const empSel = document.getElementById('attEmpId');
+    const data = {
+      employeeId: empSel.value,
+      month: document.getElementById('attMonth').value,
+      year: parseInt(document.getElementById('attYear').value),
+      workingDays: parseInt(document.getElementById('attWD').value) || 0,
+      daysPresent: parseInt(document.getElementById('attPresent').value) || 0,
+      approvedLeave: parseInt(document.getElementById('attLeave').value) || 0,
+      medicalLeave: parseInt(document.getElementById('attMedical').value) || 0,
+      emergencyLeave: parseInt(document.getElementById('attEmergency').value) || 0,
+      daysAbsent: parseFloat(document.getElementById('attAbsent').value) || 0,
+      rejectedMedOrEmg: parseFloat(document.getElementById('rejectedMedOrEmgLeaveCount')?.textContent) || 0,
+      enteredBy: currentUser.id
+    };
+    const errEl = document.getElementById('attError');
+    if (autoCalcAbsent() == false) return;
+    if (!data.workingDays) { errEl.textContent = 'Working days required.'; errEl.classList.remove('hidden'); return; }
+    errEl.classList.add('hidden');
+    google.script.run
+      .withSuccessHandler(r => {
+        showToast(r.success ? '✅ ' + r.message : '❌ ' + r.message, r.success ? 'success' : 'error');
+      })
+      .saveAttendance(data);
+  }
+
+  function loadCurrentAtt() {
+    const month = MONTHS[new Date().getMonth()];
+    const year = new Date().getFullYear();
+    google.script.run
+      .withSuccessHandler(records => {
+        const view = document.getElementById('currentAttView');
+        if (!view) return;
+        if (!records.length) { view.innerHTML = `<div class="empty-state"><div class="empty-icon">📅</div><h3>No data for ${month}</h3></div>`; return; }
+        view.innerHTML = `<div class="table-wrap"><table>
+        <thead><tr><th>Employee</th><th>WD</th><th>Present</th><th>Leave</th><th>Rejected Med/Emg</th><th>Absent</th></tr></thead>
+        <tbody>${records.map(r => `<tr>
+          <td><strong>${r.employeeName}</strong></td>
+          <td>${r.workingDays}</td>
+          <td><span style="color:var(--success);font-weight:700">${r.daysPresent}</span></td>
+          <td><span style="color:var(--accent)">${r.approvedLeave}</span></td>
+          <td><span style="color:var(--warning)">${r.rejectedMedOrEmg || 0}</span></td>
+          <td><span style="color:var(--danger);font-weight:700">${r.daysAbsent}</span></td>
+        </tr>`).join('')}</tbody>
+      </table></div>`;
+      })
+      .getAllAttendance(month, year);
+  }
+
+  // ============================================================
+  // SALARY CALCULATOR (Admin only)
+  // ============================================================
+  function renderSalaryCalc() {
+    const empOptions = allEmployees.filter(e => e.role !== 'super_admin').map(e => `<option value="${e.id}">${e.name} (${e.id})</option>`).join('');
+    const monthOptions = MONTHS.map((m, i) => `<option value="${m}" ${i === new Date().getMonth() ? 'selected' : ''}>${m}</option>`).join('');
+    setContent(`
+    <div class="page-header"><h2>Salary Calculator</h2><p>Compute salary deductions based on attendance — Admin Only</p></div>
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-header"><span class="card-title">Calculate for Employee</span></div>
+        <div class="card-body">
+          <div class="form-group"><label>Employee</label><select id="salEmpId">${empOptions}</select></div>
+          <div class="form-row">
+            <div class="form-group"><label>Month</label><select id="salMonth">${monthOptions}</select></div>
+            <div class="form-group"><label>Year</label><input type="number" id="salYear" value="${new Date().getFullYear()}"></div>
+          </div>
+          <div style="display:flex;gap:10px;flex-wrap:wrap">
+            <button class="btn-primary" onclick="calcSalary()">Calculate</button>
+            <button class="btn-secondary" onclick="bulkCalc()">Bulk All Employees</button>
+          </div>
+          <div id="salError" class="error-msg hidden" style="margin-top:12px"></div>
+        </div>
+      </div>
+
+      <div class="card" id="salaryResultCard" style="display:none">
+        <div class="card-header"><span class="card-title">Salary Breakdown</span></div>
+        <div class="card-body" id="salaryResultBody"></div>
+      </div>
+    </div>
+
+    <div class="card section-gap" style="margin-top:20px" id="bulkResultCard" style="display:none">
+      <div class="card-header"><span class="card-title">Bulk Salary Results</span></div>
+      <div class="card-body" id="bulkResultBody"></div>
+    </div>
+  `);
+  }
+
+  function calcSalary() {
+    const empId = document.getElementById('salEmpId').value;
+    const month = document.getElementById('salMonth').value;
+    const year = parseInt(document.getElementById('salYear').value);
+    const errEl = document.getElementById('salError');
+    errEl.classList.add('hidden');
+    google.script.run
+      .withSuccessHandler(r => {
+        if (!r.success) { errEl.textContent = r.message; errEl.classList.remove('hidden'); return; }
+        const d = r.data;
+        const card = document.getElementById('salaryResultCard');
+        const body = document.getElementById('salaryResultBody');
+        card.style.display = 'block';
+        const histRows = (d.historicalLeaves || []).map((h, idx, arr) => {
+          const isLast = idx === arr.length - 1;
+          return `
+        <div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border);font-size:0.8rem">
+          <span style="font-weight:600">${h.month}</span>
+          <span style="color:var(--text-2)">
+            CL: <strong>${h.approvedLeave}</strong> · 
+            RME: <strong>${h.rejectedMedOrEmg}</strong> · 
+            Abs: <strong>${h.daysAbsent}</strong> 
+            (Total: <strong style="color:var(--accent)">${h.total}d</strong>)
+            ${isLast ? `· <span style="background:#1a73e8;color:#fff;padding:2px 6px;border-radius:4px;font-weight:bold;margin-left:4px">Remaining: ${h.remaining}d</span>` : `· Remaining: <strong>${h.remaining}d</strong>`}
+          </span>
+        </div>
+      `;
+        }).join('');
+
+        body.innerHTML = `
+        <div style="margin-bottom:12px"><strong>${d.employeeName}</strong> · ${d.month} ${d.year}</div>
+        <div class="salary-result">
+          ${salRow('Base Salary', '₹' + Number(d.baseSalary).toLocaleString('en-IN'))}
+          ${salRow('Approved Casual Leave', d.approvedCasual + ' day(s)')}
+          ${salRow('Rejected Medical/Emergency Leave', d.rejectedMedicalEmergency + ' day(s)')}
+          ${salRow('Absent Days (Unapproved + Rejected Casual)', d.pureAbsent + ' day(s)', d.pureAbsent > 0 ? 'deduction' : '')}
+          ${salRow('Medical Leave (paid ✓)', d.medicalDays + ' day(s)', 'bonus')}
+          ${salRow('Emergency Leave (paid ✓)', d.emergencyDays + ' day(s)', 'bonus')}
+          ${salRow('Total Used YTD (of ' + d.maxLeaves + ')', d.totalUsed + ' day(s)', d.totalUsed > d.maxLeaves ? 'deduction' : '')}
+          ${salRow('Remaining Leaves YTD', d.remaining + ' day(s)', 'bonus')}
+          ${salRow('Extra Days YTD (beyond ' + d.maxLeaves + ')', d.extraDays + ' day(s)', d.extraDays > 0 ? 'deduction' : '')}
+          ${salRow('Absent Penalty (0.5 day/day)', '− ₹' + Number(d.absentDeduction).toLocaleString('en-IN'), d.pureAbsent > 0 ? 'deduction' : '')}
+          ${salRow('Extra Leave Deduction (1.0 day/day)', '− ₹' + Number(d.extraLeaveDeduction).toLocaleString('en-IN'), d.extraDays > 0 ? 'deduction' : '')}
+          ${salRow('Net Payable', '₹' + Number(d.netPayable).toLocaleString('en-IN'), 'total')}
+        </div>
+        <div style="font-size:0.75rem;color:var(--text-3);margin-top:12px;line-height:1.4">
+          ₹${Number(d.perDay).toFixed(0)}/day (Base ÷ 30) · Standard deduction on ${d.extraDays} extra day(s) beyond ${d.maxLeaves} · Unapproved absences and rejected casual leaves are penalized an extra 0.5 day/day.
+        </div>
+        <div style="margin-top:18px;border-top:1px solid var(--border);padding-top:12px">
+          <div style="font-weight:700;font-size:0.8rem;text-transform:uppercase;color:var(--text-3);margin-bottom:8px;letter-spacing:0.3px">📅 YTD Monthly Leave History</div>
+          ${histRows || '<div style="font-size:0.8rem;color:var(--text-3)">No prior data</div>'}
+        </div>`;
+      })
+      .calculateSalary(empId, month, year, currentUser.id);
+  }
+
+  function salRow(label, val, cls = '') {
+    return `<div class="salary-row ${cls}"><span>${label}</span><strong>${val}</strong></div>`;
+  }
+
+  function bulkCalc() {
+    const month = document.getElementById('salMonth').value;
+    const year = parseInt(document.getElementById('salYear').value);
+    showToast('⏳ Calculating bulk salaries...', 'warning');
+    google.script.run
+      .withSuccessHandler(r => {
+        showToast(r.success ? `✅ Calculated for ${r.count} employees` : '❌ Error', r.success ? 'success' : 'error');
+        if (r.success) loadBulkResults(month, year);
+      })
+      .bulkCalculateSalary(month, year);
+  }
+
+  function loadBulkResults(month, year) {
+    google.script.run
+      .withSuccessHandler(results => {
+        const card = document.getElementById('bulkResultCard');
+        const body = document.getElementById('bulkResultBody');
+        if (!card || !body) return;
+        card.style.display = 'block';
+        if (!results.length) { body.innerHTML = '<div class="empty-state">No results</div>'; return; }
+        body.innerHTML = `<div class="table-wrap"><table>
+        <thead><tr><th>Employee</th><th>Base Salary</th><th>Absent Deduction</th><th>Extra Deduction</th><th>Net Payable</th></tr></thead>
+        <tbody>${results.map(r => `<tr>
+          <td><strong>${r.employeeName}</strong><div style="font-size:0.72rem;color:var(--text-3)">${r.employeeId}</div></td>
+          <td>₹${Number(r.baseSalary).toLocaleString('en-IN')}</td>
+          <td style="color:var(--danger)">₹${Number(r.absentDeduction).toLocaleString('en-IN')}</td>
+          <td style="color:var(--danger)">₹${Number(r.extraLeaveDeduction).toLocaleString('en-IN')}</td>
+          <td style="color:var(--success);font-weight:700">₹${Number(r.netPayable).toLocaleString('en-IN')}</td>
+        </tr>`).join('')}</tbody>
+      </table></div>`;
+      })
+      .getSalaryCalcForMonth(month, year);
+  }
+
+  // ============================================================
+  // EMPLOYEES LIST (Admin)
+  // ============================================================
+  function renderEmployees() {
+    google.script.run
+      .withSuccessHandler(emps => {
+        // "View Leaves" button only shown to super_admin
+        const showViewLeaves = canViewEmployees();
+        const rows = emps.map(e => `
+        <tr>
+          <td><span style="font-family:var(--font-mono);font-size:0.8rem">${e.id}</span></td>
+          <td><strong>${e.name}</strong></td>
+          <td><a href="mailto:${e.email}" style="color:var(--accent)">${e.email}</a></td>
+          <td>${e.department}</td>
+          <td><span class="badge badge-neutral">${roleLabel(e.role)}</span></td>
+          <td>${showViewLeaves ? `<button class="btn-secondary btn-sm" onclick="viewEmpLeaves('${e.id}','${e.name}')">View Leaves</button>` : ''}</td>
+        </tr>`).join('');
+        setContent(`
+        <div class="page-header"><h2>All Employees</h2><p>${emps.length} active employees</p></div>
+        <div class="card">
+          <div class="card-body">
+            <div class="table-wrap"><table>
+              <thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Department</th><th>Role</th>${showViewLeaves ? '<th></th>' : ''}</tr></thead>
+              <tbody>${rows}</tbody>
+            </table></div>
+          </div>
+        </div>`);
+      })
+      .getEmployeeList();
+  }
+
+  function viewEmpLeaves(empId, empName) {
+    google.script.run
+      .withSuccessHandler(leaves => {
+        document.getElementById('modalTitle').textContent = `Leaves — ${empName}`;
+        document.getElementById('modalBody').innerHTML = leaves.length
+          ? `<div class="table-wrap"><table>
+            <thead><tr><th>Type</th><th>From</th><th>To</th><th>Days</th><th>Status</th></tr></thead>
+            <tbody>${leaves.map(l => `<tr>
+              <td>${l.leaveType}</td>
+              <td>${l.fromDate}</td><td>${l.toDate}</td><td>${l.totalDays}</td>
+              <td><span class="badge badge-${l.status.toLowerCase()}">${l.status}</span></td>
+            </tr>`).join('')}</tbody>
+           </table></div>`
+          : `<div class="empty-state"><div class="empty-icon">📋</div><h3>No leaves for this employee</h3></div>`;
+        document.getElementById('modal').classList.remove('hidden');
+      })
+      .getLeaveApplications({ employeeId: empId });
+  }
+
+  function triggerExtraction(source) {
+    const month = document.getElementById('extractMonth' + source).value;
+    const year = parseInt(document.getElementById('extractYear' + source).value);
+    const statusEl = document.getElementById('extractStatus' + source);
+    const btn = event.target;
+
+    if (!month || !year) {
+      showToast('Please select month and year.', 'error');
+      return;
+    }
+
+    const originalHtml = btn ? btn.innerHTML : '⚡ Sync & Extract Attendance';
+    if (btn) {
+      btn.disabled = true;
+      btn.innerHTML = '<div class="btn-spinner" style="display:inline-block;vertical-align:middle;margin-right:6px"></div>Syncing...';
+    }
+
+    statusEl.style.display = 'block';
+    statusEl.style.background = 'var(--info-bg)';
+    statusEl.style.color = 'var(--info)';
+    statusEl.style.borderColor = 'var(--info)';
+    statusEl.textContent = '⏳ Processing extraction from external sheet...';
+
+    google.script.run
+      .withSuccessHandler(r => {
+        if (btn) {
+          btn.disabled = false;
+          btn.innerHTML = originalHtml;
+        }
+        if (r.success) {
+          statusEl.style.background = 'var(--success-bg)';
+          statusEl.style.color = 'var(--success)';
+          statusEl.style.borderColor = 'var(--success)';
+          statusEl.textContent = '✅ ' + r.message;
+          showToast('✅ ' + r.message, 'success');
+
+          // Refresh views
+          if (source === 'Entry') {
+            loadCurrentAtt();
+          } else if (currentPage === 'dashboard') {
+            renderDashboard();
+          }
+        } else {
+          statusEl.style.background = 'var(--danger-bg)';
+          statusEl.style.color = 'var(--danger)';
+          statusEl.style.borderColor = 'var(--danger)';
+          statusEl.textContent = '❌ ' + r.message;
+          showToast('❌ ' + r.message, 'error');
+        }
+      })
+      .withFailureHandler(err => {
+        if (btn) {
+          btn.disabled = false;
+          btn.innerHTML = originalHtml;
+        }
+        statusEl.style.background = 'var(--danger-bg)';
+        statusEl.style.color = 'var(--danger)';
+        statusEl.style.borderColor = 'var(--danger)';
+        statusEl.textContent = '❌ Connection failure: ' + err.message;
+        showToast('❌ Extraction failed.', 'error');
+      })
+      .extractMonthlyAttendance(month, year, currentUser.id);
+  }
+
+  function triggerTestMail() {
+    const btn = document.getElementById('btnSendTestMail');
+    const spin = document.getElementById('testMailSpinner');
+    const statusEl = document.getElementById('testMailStatus');
+
+    if (!btn || !statusEl) return;
+
+    btn.disabled = true;
+    if (spin) spin.classList.remove('hidden');
+
+    statusEl.style.display = 'block';
+    statusEl.style.background = 'var(--info-bg)';
+    statusEl.style.color = 'var(--info)';
+    statusEl.style.borderColor = 'var(--info)';
+    statusEl.textContent = '⏳ Sending official leave thread launch email...';
+
+    google.script.run
+      .withSuccessHandler(r => {
+        btn.disabled = false;
+        if (spin) spin.classList.add('hidden');
+        if (r.success) {
+          statusEl.style.background = 'var(--success-bg)';
+          statusEl.style.color = 'var(--success)';
+          statusEl.style.borderColor = 'var(--success)';
+          statusEl.textContent = '✅ ' + r.message;
+          showToast('✅ Launch email sent successfully!', 'success');
+        } else {
+          statusEl.style.background = 'var(--danger-bg)';
+          statusEl.style.color = 'var(--danger)';
+          statusEl.style.borderColor = 'var(--danger)';
+          statusEl.textContent = '❌ ' + r.message;
+          showToast('❌ Launch email sending failed.', 'error');
+        }
+      })
+      .withFailureHandler(err => {
+        btn.disabled = false;
+        if (spin) spin.classList.add('hidden');
+        statusEl.style.background = 'var(--danger-bg)';
+        statusEl.style.color = 'var(--danger)';
+        statusEl.style.borderColor = 'var(--danger)';
+        statusEl.textContent = '❌ Connection failure: ' + err.message;
+        showToast('❌ Connection error.', 'error');
+      })
+      .sendTestMail();
+  }
+
+  // ============================================================
+  // SIDEBAR
+  // ============================================================
+  function openSidebar() {
+    document.getElementById('sidebar').classList.add('open');
+    document.getElementById('sidebarOverlay').classList.remove('hidden');
+  }
+  function closeSidebar() {
+    document.getElementById('sidebar').classList.remove('open');
+    document.getElementById('sidebarOverlay').classList.add('hidden');
+  }
+  function toggleSidebar() {
+    const mainApp = document.getElementById('mainApp');
+    const isMobile = window.innerWidth <= 1024;
+
+    if (isMobile) {
+      const sidebar = document.getElementById('sidebar');
+      const overlay = document.getElementById('sidebarOverlay');
+      const isOpen = sidebar.classList.contains('open');
+      if (isOpen) {
+        sidebar.classList.remove('open');
+        overlay.classList.add('hidden');
+      } else {
+        sidebar.classList.add('open');
+        overlay.classList.remove('hidden');
+      }
+    } else {
+      mainApp.classList.toggle('sidebar-collapsed');
+    }
+  }
+
+  // ============================================================
+  // MODAL
+  // ============================================================
+  function closeModal() { document.getElementById('modal').classList.add('hidden'); }
+  window.onclick = e => { if (e.target.id === 'modal') closeModal(); };
+
+  // ============================================================
+  // TOAST
+  // ============================================================
+  let toastTimer;
+  function showToast(msg, type = '') {
+    const el = document.getElementById('toast');
+    el.textContent = msg;
+    el.className = `toast ${type}`;
+    el.classList.remove('hidden');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.classList.add('hidden'), 3500);
+  }
+
+  // ============================================================
+  // HELPERS
+  // ============================================================
+  function getGreeting() {
+    const h = new Date().getHours();
+    if (h < 12) return 'morning';
+    if (h < 17) return 'afternoon';
+    return 'evening';
+  }
+
+  // Enter key on login
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && document.getElementById('loginScreen').classList.contains('active')) {
+      doLogin();
+    }
+  });
+
+  // ============================================================
+  // EMPLOYEE ANALYSIS & AI REPORTS
+  // ============================================================
+
+  function renderEmpAnalysis() {
+    const empOptions = allEmployees
+      .filter(e => e.id && e.id.startsWith('EMP'))
+      .map(e => `<option value="${e.id}">${e.name} (${e.id})</option>`)
+      .join('');
+
+    setContent(`
+    <div class="page-header">
+      <h2>Employee Intelligence Analysis 📊</h2>
+      <p>YTD attendance visualizations, leave allocations, and generative AI executive reports</p>
+    </div>
+
+    <!-- API Key Secure Management Panel -->
+    <div class="api-key-drawer">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <h4 style="font-weight:700;font-size:0.9rem;color:var(--text);display:flex;align-items:center;gap:6px">
+          🔑 Secure Gemini LLM Configuration
+        </h4>
+        <button class="btn-secondary btn-sm" onclick="toggleApiKeyInput()" id="toggleKeyBtn">Show Config</button>
+      </div>
+      <div id="apiKeyConfigBox" class="hidden" style="margin-top:10px">
+        <p style="font-size:0.8rem;color:var(--text-3);margin-bottom:8px">
+          To enable automated AI executive HR reports, securely configure your Google Gemini API Key. The key is stored in your Google Apps Script backend <code>ScriptProperties</code> and is never exposed in the source code.
+        </p>
+        <div style="display:flex;gap:12px;max-width:500px">
+          <input type="password" id="geminiApiKeyInput" placeholder="Enter Gemini API Key (e.g. AIzaSy...)" style="flex:1;padding:8px 12px;background:var(--bg-input);border:1.5px solid var(--border);border-radius:var(--r-sm);color:var(--text);outline:none;font-size:0.85rem">
+          <button class="btn-primary btn-sm" onclick="saveGeminiKey()">Save Key</button>
+        </div>
+        <div id="apiKeyStatus" style="font-size:0.8rem;margin-top:6px;font-weight:600">Checking configuration...</div>
+      </div>
+    </div>
+
+    <!-- Control Board -->
+    <div class="card section-gap">
+      <div class="card-body">
+        <div class="analysis-controls">
+          <div class="form-group" style="margin:0;min-width:240px">
+            <label>Select Employee</label>
+            <select id="analysisEmpSelect" style="padding:10px 14px">${empOptions}</select>
+          </div>
+          <div style="margin-top:22px">
+            <button class="btn-primary" id="btnGenAnalysis" onclick="loadEmployeeAnalysis()">
+              <span>📊 Generate Visual &amp; AI Analysis</span>
+              <div id="genAnalysisSpinner" class="btn-spinner hidden" style="margin-left:8px"></div>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Report Presentation Card -->
+    <div id="analysisReportCard" class="report-card-wrapper hidden fade-in">
+      
+      <!-- GYWS Official Letterhead -->
+      <div class="report-letterhead">
+        <div class="letterhead-org">Gopali Youth Welfare Society</div>
+        <div class="letterhead-sub">IIT Kharagpur · Leave &amp; Attendance Intelligence Report</div>
+      </div>
+
+      <!-- Report Metadata -->
+      <div class="report-title-block">
+        <h3 class="report-title">Attendance &amp; Leave Assessment</h3>
+        <div style="font-size:0.8rem;color:var(--text-3);margin-top:4px" id="reportGenDate">Report Generated: June 1, 2026</div>
+      </div>
+
+      <div class="report-meta-grid">
+        <div class="report-meta-item">Employee Name: <strong id="repEmpName">Amit Patra</strong></div>
+        <div class="report-meta-item">Employee ID: <strong id="repEmpId">EMP001</strong></div>
+        <div class="report-meta-item">Role: <strong id="repEmpRole">Office Staff</strong></div>
+        <div class="report-meta-item">Department: <strong id="repEmpDept">Management</strong></div>
+      </div>
+
+      <!-- YTD Executive Summary Stats -->
+      <h4 style="font-weight:700;font-size:0.92rem;color:var(--text);margin-bottom:12px;text-transform:uppercase;letter-spacing:0.3px">
+        📊 Year-To-Date Key Figures (2026)
+      </h4>
+      <div class="stats-grid section-gap" style="grid-template-columns:repeat(auto-fit, minmax(140px, 1fr))">
+        <div class="stat-card" style="padding:14px">
+          <div class="stat-icon blue" style="width:36px;height:36px;font-size:0.95rem">📅</div>
+          <div class="stat-info">
+            <div class="stat-value" style="font-size:1.3rem" id="repStatWorking">0</div>
+            <div class="stat-label" style="font-size:0.65rem">Working Days</div>
+          </div>
+        </div>
+        <div class="stat-card" style="padding:14px">
+          <div class="stat-icon green" style="width:36px;height:36px;font-size:0.95rem">✅</div>
+          <div class="stat-info">
+            <div class="stat-value" style="font-size:1.3rem" id="repStatPresent">0</div>
+            <div class="stat-label" style="font-size:0.65rem">Days Present</div>
+          </div>
+        </div>
+        <div class="stat-card" style="padding:14px">
+          <div class="stat-icon red" style="width:36px;height:36px;font-size:0.95rem">❌</div>
+          <div class="stat-info">
+            <div class="stat-value" style="font-size:1.3rem" id="repStatAbsent">0</div>
+            <div class="stat-label" style="font-size:0.65rem">Absent Days</div>
+          </div>
+        </div>
+        <div class="stat-card" style="padding:14px">
+          <div class="stat-icon purple" style="width:36px;height:36px;font-size:0.95rem">📋</div>
+          <div class="stat-info">
+            <div class="stat-value" style="font-size:1.3rem" id="repStatLeaves">0</div>
+            <div class="stat-label" style="font-size:0.65rem">Leaves Used</div>
+          </div>
+        </div>
+        <div class="stat-card" style="padding:14px">
+          <div class="stat-icon amber" style="width:36px;height:36px;font-size:0.95rem">📈</div>
+          <div class="stat-info">
+            <div class="stat-value" style="font-size:1.3rem" id="repStatRate">0%</div>
+            <div class="stat-label" style="font-size:0.65rem">Attendance Rate</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Graphical Analysis Row -->
+      <div class="chart-container-row">
+        <div class="chart-card">
+          <div class="chart-card-title">YTD Attendance Timeline</div>
+          <div class="chart-wrap">
+            <canvas id="attendanceTrendChart"></canvas>
+          </div>
+        </div>
+        <div class="chart-card">
+          <div class="chart-card-title">Leave Type Breakdown</div>
+          <div class="chart-wrap">
+            <canvas id="leaveDistributionChart"></canvas>
+          </div>
+        </div>
+      </div>
+
+      <!-- AI Summary / Programmatic Analysis Card -->
+      <div style="margin-top:28px">
+        <h4 style="font-weight:700;font-size:0.92rem;color:var(--text);margin-bottom:12px;text-transform:uppercase;letter-spacing:0.3px;display:flex;align-items:center;justify-content:between">
+          <span>🧠 Executive HR Analysis Report</span>
+          <button class="btn-secondary btn-sm" id="btnRegenSummary" style="margin-left:auto;font-size:0.75rem" onclick="regenerateAiSummary()">🔄 Regenerate Narrative</button>
+        </h4>
+        <div id="aiSummaryBox" class="ai-summary-box">
+          <div class="loading-screen" id="aiReportLoader" style="min-height:120px">
+            <div class="loader-ring" style="width:30px;height:30px"></div>
+            <p style="font-size:0.8rem">Analyzing employee metrics &amp; writing AI insights report...</p>
+          </div>
+          <div id="aiSummaryContent" class="fade-in"></div>
+        </div>
+      </div>
+
+      <!-- Printing and Export Controls -->
+      <div style="display:flex;gap:16px;margin-top:32px" class="analysis-controls">
+        <button class="btn-primary" onclick="downloadAnalysisPdf()">
+          📥 Download PDF Report
+        </button>
+        <button class="btn-secondary" onclick="printAnalysisReport()">
+          🖨️ Print Report
+        </button>
+      </div>
+
+    </div>
+  `);
+
+    // Check backend Key configuration on load
+    checkApiKeyConfig();
+  }
+
+  function toggleApiKeyInput() {
+    const box = document.getElementById('apiKeyConfigBox');
+    const btn = document.getElementById('toggleKeyBtn');
+    if (box.classList.contains('hidden')) {
+      box.classList.remove('hidden');
+      btn.textContent = 'Hide Config';
+    } else {
+      box.classList.add('hidden');
+      btn.textContent = 'Show Config';
+    }
+  }
+
+  function checkApiKeyConfig() {
+    google.script.run
+      .withSuccessHandler(keyMasked => {
+        const statusEl = document.getElementById('apiKeyStatus');
+        if (keyMasked) {
+          statusEl.textContent = 'Configured securely: ' + keyMasked;
+          statusEl.style.color = 'var(--success)';
+        } else {
+          statusEl.textContent = 'Not configured. Generative AI summaries are disabled.';
+          statusEl.style.color = 'var(--warning)';
+        }
+      })
+      .getGeminiApiKey();
+  }
+
+  function saveGeminiKey() {
+    const key = document.getElementById('geminiApiKeyInput').value.trim();
+    const statusEl = document.getElementById('apiKeyStatus');
+    if (!key) {
+      showToast('Please enter an API Key first.', 'error');
+      return;
+    }
+
+    statusEl.textContent = 'Saving key...';
+    statusEl.style.color = 'var(--text-3)';
+
+    google.script.run
+      .withSuccessHandler(r => {
+        if (r.success) {
+          showToast(r.message, 'success');
+          document.getElementById('geminiApiKeyInput').value = '';
+          checkApiKeyConfig();
+        } else {
+          showToast(r.message, 'error');
+          statusEl.textContent = 'Error: ' + r.message;
+          statusEl.style.color = 'var(--danger)';
+        }
+      })
+      .saveGeminiApiKey(key);
+  }
+
+  function loadEmployeeAnalysis() {
+    const empId = document.getElementById('analysisEmpSelect').value;
+    const btn = document.getElementById('btnGenAnalysis');
+    const spinner = document.getElementById('genAnalysisSpinner');
+
+    btn.disabled = true;
+    spinner.classList.remove('hidden');
+
+    google.script.run
+      .withSuccessHandler(r => {
+        btn.disabled = false;
+        spinner.classList.add('hidden');
+
+        if (!r.success) {
+          showToast('❌ ' + r.message, 'error');
+          return;
+        }
+
+        renderReportCardData(r);
+      })
+      .withFailureHandler(err => {
+        btn.disabled = false;
+        spinner.classList.add('hidden');
+        showToast('❌ Connection error: ' + err.message, 'error');
+      })
+      .getEmployeeAnalysisData(empId, 2026);
+  }
+
+  function renderReportCardData(data) {
+    const emp = data.employee;
+    const att = data.attendance || [];
+    const lb = data.leaveBalance;
+
+    document.getElementById('analysisReportCard').classList.remove('hidden');
+    document.getElementById('repEmpName').textContent = emp.name;
+    document.getElementById('repEmpId').textContent = emp.id;
+    document.getElementById('repEmpRole').textContent = roleLabel(emp.role);
+    document.getElementById('repEmpDept').textContent = emp.department || 'General';
+    document.getElementById('reportGenDate').textContent = 'Report Generated: ' + new Date().toLocaleDateString('en-IN', {
+      day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata'
+    }) + ' IST';
+
+    // Aggregate data from January YTD
+    let totWorking = 0, totPresent = 0, totAbsent = 0, totLeaves = 0;
+    att.forEach(r => {
+      totWorking += (parseFloat(r.workingDays) || 0);
+      totPresent += (parseFloat(r.daysPresent) || 0);
+      totAbsent += (parseFloat(r.daysAbsent) || 0); // Pure absents (includes rejected casual leaves)
+      totLeaves += (parseFloat(r.approvedLeave) || 0) + (parseFloat(r.medicalLeave) || 0) + (parseFloat(r.emergencyLeave) || 0) + (parseFloat(r.rejectedMedOrEmg) || 0);
+    });
+
+    const attRate = totWorking > 0 ? ((totPresent / totWorking) * 100).toFixed(1) : '0.0';
+
+    document.getElementById('repStatWorking').textContent = totWorking;
+    document.getElementById('repStatPresent').textContent = totPresent;
+    document.getElementById('repStatAbsent').textContent = totAbsent;
+    document.getElementById('repStatLeaves').textContent = totLeaves;
+    document.getElementById('repStatRate').textContent = attRate + '%';
+
+    // Render Graphical Charts
+    renderAnalysisCharts(att, lb);
+
+    // Load AI Summary
+    loadAiReportSummary(emp.id, 2026, data);
+  }
+
+  function renderAnalysisCharts(att, lb) {
+    const months = att.map(r => r.month);
+    const presentData = att.map(r => parseFloat(r.daysPresent) || 0);
+    const workingData = att.map(r => parseFloat(r.workingDays) || 0);
+    const absentData = att.map(r => parseFloat(r.daysAbsent) || 0);
+
+    // YTD Leaves Distribution
+    let approvedCasual = 0, medical = 0, emergency = 0, rejectedMedEmg = 0, pureAbsent = 0;
+    att.forEach(r => {
+      approvedCasual += (parseFloat(r.approvedLeave) || 0);
+      medical += (parseFloat(r.medicalLeave) || 0);
+      emergency += (parseFloat(r.emergencyLeave) || 0);
+      rejectedMedEmg += (parseFloat(r.rejectedMedOrEmg) || 0);
+      pureAbsent += (parseFloat(r.daysAbsent) || 0);
+    });
+
+    // Clean previous chart canvas context structures
+    if (window.attTrendChart instanceof Chart) window.attTrendChart.destroy();
+    if (window.leaveDonutChart instanceof Chart) window.leaveDonutChart.destroy();
+
+    const isDark = document.getElementById('appBody').classList.contains('dark-theme');
+    const textColor = isDark ? '#9CA3C8' : '#4A5080';
+    const gridColor = isDark ? 'rgba(42,45,80,0.4)' : 'rgba(232,234,255,0.8)';
+
+    // Line Chart
+    const ctxLine = document.getElementById('attendanceTrendChart').getContext('2d');
+    window.attTrendChart = new Chart(ctxLine, {
+      type: 'line',
+      data: {
+        labels: months,
+        datasets: [
+          {
+            label: 'Working Days',
+            data: workingData,
+            borderColor: '#4F6EF7',
+            backgroundColor: 'rgba(79, 110, 247, 0.05)',
+            borderWidth: 2,
+            borderDash: [5, 5],
+            tension: 0.2,
+            fill: false
+          },
+          {
+            label: 'Days Present',
+            data: presentData,
+            borderColor: '#22C55E',
+            backgroundColor: 'rgba(34, 197, 94, 0.1)',
+            borderWidth: 3,
+            tension: 0.15,
+            fill: true
+          },
+          {
+            label: 'Absent & Penalties',
+            data: absentData,
+            borderColor: '#EF4444',
+            backgroundColor: 'rgba(239, 68, 68, 0.05)',
+            borderWidth: 2.5,
+            tension: 0.2,
+            fill: false
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: {
+            labels: { color: textColor, font: { family: 'Plus Jakarta Sans', size: 10, weight: '500' } }
+          }
+        },
+        scales: {
+          x: {
+            grid: { color: gridColor },
+            ticks: { color: textColor, font: { family: 'Plus Jakarta Sans', size: 9 } }
+          },
+          y: {
+            grid: { color: gridColor },
+            ticks: { color: textColor, font: { family: 'Plus Jakarta Sans', size: 9 } }
+          }
+        }
+      }
+    });
+
+    // Donut Chart
+    const ctxDonut = document.getElementById('leaveDistributionChart').getContext('2d');
+    window.leaveDonutChart = new Chart(ctxDonut, {
+      type: 'doughnut',
+      data: {
+        labels: ['Casual Leaves', 'Medical Leaves', 'Emergency Leaves', 'Absent Days', 'Rejected Med/Emg'],
+        datasets: [{
+          data: [approvedCasual, medical, emergency, pureAbsent, rejectedMedEmg],
+          backgroundColor: ['#4F6EF7', '#06B6D4', '#F59E0B', '#EF4444', '#8B90B8'],
+          borderWidth: isDark ? 2 : 1.5,
+          borderColor: isDark ? '#1E2040' : '#FFFFFF'
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: {
+            position: 'right',
+            labels: { color: textColor, font: { family: 'Plus Jakarta Sans', size: 9 } }
+          }
+        },
+        cutout: '60%'
+      }
+    });
+  }
+
+  function loadAiReportSummary(empId, year, rawData) {
+    const loader = document.getElementById('aiReportLoader');
+    const content = document.getElementById('aiSummaryContent');
+
+    loader.classList.remove('hidden');
+    content.innerHTML = '';
+
+    google.script.run
+      .withSuccessHandler(r => {
+        loader.classList.add('hidden');
+        if (r.success) {
+          content.innerHTML = parseAnalysisMarkdown(r.summary);
+        } else {
+          // Fallback programmatic summary
+          renderProgrammaticFallbackSummary(rawData);
+        }
+      })
+      .withFailureHandler(err => {
+        loader.classList.add('hidden');
+        renderProgrammaticFallbackSummary(rawData);
+      })
+      .generateEmployeeAiSummary(empId, year);
+  }
+
+  function regenerateAiSummary() {
+    const empId = document.getElementById('analysisEmpSelect').value;
+    loadAiReportSummary(empId, 2026, null);
+  }
+
+  function renderProgrammaticFallbackSummary(data) {
+    const content = document.getElementById('aiSummaryContent');
+    if (!data) {
+      content.innerHTML = `
+      <div style="padding:12px;background:var(--warning-bg);border:1px solid var(--warning);border-radius:8px;color:var(--warning)">
+        ⚠️ Could not retrieve detailed employee history. AI Analysis unavailable.
+      </div>`;
+      return;
+    }
+
+    const emp = data.employee;
+    const att = data.attendance || [];
+
+    let totWorking = 0, totPresent = 0, totAbsent = 0, totCasual = 0, totMed = 0, totEmg = 0, totRme = 0;
+    att.forEach(r => {
+      totWorking += (parseFloat(r.workingDays) || 0);
+      totPresent += (parseFloat(r.daysPresent) || 0);
+      totAbsent += (parseFloat(r.daysAbsent) || 0);
+      totCasual += (parseFloat(r.approvedLeave) || 0);
+      totMed += (parseFloat(r.medicalLeave) || 0);
+      totEmg += (parseFloat(r.emergencyLeave) || 0);
+      totRme += (parseFloat(r.rejectedMedOrEmg) || 0);
+    });
+
+    const rate = totWorking > 0 ? (totPresent / totWorking) * 100 : 0;
+
+    let rating = 'Needs Consistency Improvement';
+    let ratingColor = 'var(--warning)';
+    let desc = 'The employee shows attendance re-evaluation needs. Engagement score can be optimized.';
+    if (rate >= 95) {
+      rating = 'Exceptional Connection';
+      ratingColor = 'var(--success)';
+      desc = 'The employee exhibits extraordinary consistency and organizational dedication. They maintain perfect regular attendance.';
+    } else if (rate >= 85) {
+      rating = 'Reliable Performer';
+      ratingColor = 'var(--info)';
+      desc = 'The employee is highly consistent, meets standard performance expectations regularly, and works with stability.';
+    } else if (rate < 75) {
+      rating = 'Critical Concern';
+      ratingColor = 'var(--danger)';
+      desc = 'Absenteeism is high and unapproved leaves require immediate supervisory evaluation and feedback.';
+    }
+
+    const html = `
+    <div style="margin-bottom:16px;padding:12px;background:var(--border);border-radius:var(--r-sm);font-size:0.8rem;color:var(--text-2);display:flex;align-items:center;gap:8px">
+      ℹ️ <em>Gemini AI Key is not configured. Displaying automated statistical programmatic report. To unlock AI generative text analysis, enter your Gemini Key in the panel above.</em>
+    </div>
+    
+    <h2>1. Executive Attendance Summary</h2>
+    <p>The employee <strong>${emp.name}</strong> has worked in the <strong>${emp.department || 'General'}</strong> department with an accumulated YTD attendance rate of <strong style="color:var(--accent)">${rate.toFixed(1)}%</strong>. Across a total of <strong>${totWorking}</strong> working days, they were present for <strong>${totPresent}</strong> days and unapproved absent for <strong>${totAbsent}</strong> days.</p>
+    
+    <h2>2. Leave Pattern Analysis</h2>
+    <p>Year-to-date, the employee has utilized a total of <strong>${totCasual + totMed + totEmg + totRme}</strong> leave days, structured as follows:</p>
+    <ul>
+      <li><strong>Approved Casual Leaves</strong>: ${totCasual} days</li>
+      <li><strong>Medical Leaves Used</strong>: ${totMed} days</li>
+      <li><strong>Emergency Leaves Used</strong>: ${totEmg} days</li>
+      <li><strong>Rejected Medical/Emergency Leaves (no penalty)</strong>: ${totRme} days</li>
+    </ul>
+    <p>Unapproved absences and casual rejections sum to <strong>${totAbsent}</strong> days. Leaves are within standard institutional limits.</p>
+
+    <h2>3. Engagement and Dedication Rating</h2>
+    <blockquote style="border-left-color:${ratingColor}">
+      <strong>Status: <span style="color:${ratingColor}">${rating}</span></strong><br>
+      ${desc}
+    </blockquote>
+
+    <h2>4. Actionable Recommendations</h2>
+    <ul>
+      <li><strong>Regular Assessment</strong>: Continue standard monthly attendance prefill audits to monitor unapproved absences.</li>
+      <li>${rate >= 90 ? '<strong>Appreciation</strong>: Consider official praise for exceptional attendance continuity.' : '<strong>Supervisor Review</strong>: Conduct a support discussion to align schedules and minimize penalized unapproved absences.'}</li>
+    </ul>
+  `;
+    content.innerHTML = html;
+  }
+
+  function parseAnalysisMarkdown(md) {
+    if (!md) return '';
+    let html = md
+      .replace(/### (.*?)\n/g, '<h3>$1</h3>')
+      .replace(/## (.*?)\n/g, '<h2>$1</h2>')
+      .replace(/# (.*?)\n/g, '<h1>$1</h1>')
+      .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+      .replace(/\*(.*?)\*/g, '<em>$1</em>')
+      .replace(/> (.*?)\n/g, '<blockquote>$1</blockquote>')
+      .replace(/\n\n/g, '</p><p>')
+      .replace(/\n/g, '<br>');
+
+    // Handle lists
+    html = html.replace(/- (.*?)(<br>|$)/g, '<li>$1</li>');
+    html = html.replace(/(<li>.*?<\/li>)/gs, '<ul>$1</ul>');
+
+    // Clean empty paragraphs
+    html = '<p>' + html + '</p>';
+    html = html.replace(/<p><\/p>/g, '');
+    return html;
+  }
+
+  function downloadAnalysisPdf() {
+    const element = document.getElementById('analysisReportCard');
+    const empSelect = document.getElementById('analysisEmpSelect');
+    const empId = empSelect.value;
+    const empName = empSelect.options[empSelect.selectedIndex].text.split(' (')[0].replace(/\s+/g, '_');
+
+    // Temporarily hide action controls in printed document output
+    const controls = document.querySelectorAll('.analysis-controls, #btnRegenSummary');
+    controls.forEach(c => c.style.display = 'none');
+
+    const opt = {
+      margin: [12, 12, 12, 12],
+      filename: `GYWS_Report_${empId}_${empName}_2026.pdf`,
+      image: { type: 'jpeg', quality: 0.98 },
+      html2canvas: { scale: 2, useCORS: true, letterRendering: true },
+      jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+      pagebreak: { mode: ['avoid-all', 'css', 'legacy'] }
+    };
+
+    html2pdf()
+      .set(opt)
+      .from(element)
+      .save()
+      .then(() => {
+        controls.forEach(c => c.style.display = 'flex');
+        showToast('📥 Report PDF downloaded successfully.', 'success');
+      })
+      .catch(err => {
+        controls.forEach(c => c.style.display = 'flex');
+        showToast('❌ PDF Export failed: ' + err.message, 'error');
+      });
+  }
+
+  function printAnalysisReport() {
+    window.print();
+  }
+
+</script>

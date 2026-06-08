@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Leave &amp; Attendance System</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <?!= include('Styles'); ?>
+  <!-- Chart.js and html2pdf.js for premium visualizations and PDF export -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+</head>
+<body class="light-theme" id="appBody">
+
+<!-- ============================================================
+     LOGIN SCREEN
+============================================================ -->
+<div id="loginScreen" class="screen active">
+  <div class="login-bg">
+    <div class="login-blob b1"></div>
+    <div class="login-blob b2"></div>
+    <div class="login-blob b3"></div>
+  </div>
+  <div class="login-card">
+    <div class="login-logo">
+      <div class="logo-icon">
+        <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+          <rect width="32" height="32" rx="10" fill="currentColor" opacity="0.15"/>
+          <path d="M16 6L26 12V20L16 26L6 20V12L16 6Z" stroke="currentColor" stroke-width="2" fill="none"/>
+          <circle cx="16" cy="16" r="4" fill="currentColor"/>
+        </svg>
+      </div>
+      <div class="logo-text">
+        <span class="logo-title">LeaveTrack</span>
+        <span class="logo-sub">Attendance Management</span>
+      </div>
+    </div>
+
+    <h2 class="login-heading">Welcome back</h2>
+    <p class="login-desc">Sign in with your Employee ID and password</p>
+
+    <div class="form-group">
+      <label>Employee ID</label>
+      <input type="text" id="loginEmpId" placeholder="e.g. EMP001" autocomplete="off">
+    </div>
+    <div class="form-group">
+      <label>Password</label>
+      <div class="pw-wrap">
+        <input type="password" id="loginPassword" placeholder="Enter your password">
+        <button class="pw-toggle" onclick="togglePw()">👁</button>
+      </div>
+    </div>
+
+    <button class="btn-primary btn-full" onclick="doLogin()">
+      <span id="loginBtnText">Sign In</span>
+      <div id="loginSpinner" class="btn-spinner hidden"></div>
+    </button>
+    <div id="loginError" class="error-msg hidden"></div>
+
+    <div class="login-footer">
+      <button class="theme-toggle-btn" onclick="toggleTheme()">🌙 Switch Theme</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================
+     MAIN APP
+============================================================ -->
+<div id="mainApp" class="screen hidden">
+
+  <!-- SIDEBAR -->
+  <nav class="sidebar" id="sidebar">
+    <div class="sidebar-header">
+      <div class="sidebar-logo">
+        <div class="logo-icon small">
+          <svg width="22" height="22" viewBox="0 0 32 32" fill="none">
+            <rect width="32" height="32" rx="10" fill="currentColor" opacity="0.15"/>
+            <path d="M16 6L26 12V20L16 26L6 20V12L16 6Z" stroke="currentColor" stroke-width="2" fill="none"/>
+            <circle cx="16" cy="16" r="4" fill="currentColor"/>
+          </svg>
+        </div>
+        <span class="sidebar-title">LeaveTrack</span>
+      </div>
+      <button class="sidebar-close" onclick="closeSidebar()">✕</button>
+    </div>
+
+    <div class="sidebar-user">
+      <div class="user-avatar" id="sidebarAvatar">A</div>
+      <div class="user-info">
+        <span class="user-name" id="sidebarName">Loading…</span>
+        <span class="user-role-badge" id="sidebarRole">Employee</span>
+      </div>
+    </div>
+
+    <!-- ---- MAIN NAV (visible to all roles unless restricted) ---- -->
+    <div class="nav-section">
+      <span class="nav-label">Main</span>
+
+      <!-- Dashboard — everyone sees it -->
+      <a class="nav-item active" data-page="dashboard" onclick="navigate('dashboard')">
+        <span class="nav-icon">⬡</span> Dashboard
+      </a>
+
+      <!-- Employee-only: personal leave & attendance views -->
+      <!-- Hidden for super_admin by _buildNav() -->
+      <a class="nav-item nav-employee-only" data-page="myLeaves" onclick="navigate('myLeaves')">
+        <span class="nav-icon">📋</span> My Leaves
+      </a>
+      <a class="nav-item nav-employee-only" data-page="myAttendance" onclick="navigate('myAttendance')">
+        <span class="nav-icon">📅</span> My Attendance
+      </a>
+
+      <!-- Apply leave for SELF — hidden for super_admin -->
+      <a class="nav-item nav-employee-only" data-page="applyLeave" onclick="navigate('applyLeave')">
+        <span class="nav-icon">✚</span> Apply Leave
+      </a>
+    </div>
+
+    <!-- ---- ADMIN NAV (Office Staff + Super Admin) ---- -->
+    <!-- Hidden entirely for 'employee' role by _buildNav() -->
+    <div class="nav-section hidden" id="adminNav">
+      <span class="nav-label">Administration</span>
+
+      <!-- All leave applications — view for office_staff, approve for super_admin -->
+      <a class="nav-item" data-page="allLeaves" onclick="navigate('allLeaves')">
+        <span class="nav-icon">📬</span> All Applications
+        <span class="badge-count" id="pendingBadge"></span>
+      </a>
+
+      <!-- Attendance entry — Office Staff + Super Admin -->
+      <a class="nav-item" data-page="attendance" onclick="navigate('attendance')">
+        <span class="nav-icon">✏️</span> Enter Attendance
+      </a>
+
+      <!-- Salary & Employees — Super Admin only -->
+      <a class="nav-item nav-super-admin-only" data-page="salaryCalc" onclick="navigate('salaryCalc')">
+        <span class="nav-icon">💰</span> Salary Calculator
+      </a>
+      <a class="nav-item nav-super-admin-only" data-page="empAnalysis" onclick="navigate('empAnalysis')">
+        <span class="nav-icon">📊</span> Employee Analysis
+      </a>
+      <a class="nav-item nav-super-admin-only" data-page="employees" onclick="navigate('employees')">
+        <span class="nav-icon">👥</span> Employees
+      </a>
+    </div>
+
+    <!-- ---- FOOTER ---- -->
+    <div class="sidebar-footer">
+      <button class="nav-item theme-nav-btn" onclick="toggleTheme()">
+        <span class="nav-icon" id="themeIcon">🌙</span>
+        <span id="themeLabel">Dark Mode</span>
+      </button>
+      <button class="nav-item logout-btn" onclick="logout()">
+        <span class="nav-icon">↩</span> Logout
+      </button>
+    </div>
+  </nav>
+
+  <!-- Mobile overlay -->
+  <div class="sidebar-overlay hidden" id="sidebarOverlay" onclick="closeSidebar()"></div>
+
+  <!-- MAIN CONTENT -->
+  <div class="main-content" id="mainContent">
+    <header class="topbar">
+      <button class="hamburger" onclick="toggleSidebar()">☰</button>
+      <div class="topbar-left">
+        <h1 class="page-title" id="pageTitle">Dashboard</h1>
+        <span class="page-subtitle" id="pageSubtitle"></span>
+      </div>
+      <div class="topbar-right">
+        <div class="topbar-date" id="topbarDate"></div>
+        <div class="avatar-sm" id="topbarAvatar">A</div>
+      </div>
+    </header>
+
+    <div class="page-content" id="pageContent">
+      <div class="loading-screen" id="globalLoader">
+        <div class="loader-ring"></div>
+        <p>Loading…</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- TOAST -->
+<div id="toast" class="toast hidden"></div>
+
+<!-- MODAL -->
+<div id="modal" class="modal-overlay hidden">
+  <div class="modal-box">
+    <div class="modal-header">
+      <h3 id="modalTitle"></h3>
+      <button onclick="closeModal()">✕</button>
+    </div>
+    <div id="modalBody" class="modal-body"></div>
+  </div>
+</div>
+
+<?!= include('AppScript'); ?>
+</body>
+</html>
